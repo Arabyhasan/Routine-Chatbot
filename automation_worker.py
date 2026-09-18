@@ -7,6 +7,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Dict, List
 
+from chatbot import RoutineChatbot
 from config_loader import Config
 from google_integration import GoogleIntegration
 from message_parser import parse_meeting_request_text
@@ -59,6 +60,17 @@ class AutomationWorker:
         self.slack = SlackIntegration() if self.service_config.slack_enabled else None
         self.google = GoogleIntegration() if self.service_config.gmail_enabled or self.service_config.calendar_enabled else None
         self.priority_manager = PriorityManager(self.config)
+        self.bot = RoutineChatbot(config_path=config_path, routine_path=routine_path, service_config=self.service_config)
+
+    def _handle_slack_message(self, raw_text: str, sender_id: str, sender_name: str, channel: str, message_id: str = "") -> Dict[str, Any]:
+        key = message_id or f"{channel}:{sender_id}:{raw_text}"
+        if not self.processed_store.should_process(key):
+            return {"status": "duplicate", "message": "Message already processed."}
+
+        reply = self.bot.respond(raw_text)
+        if self.slack is not None and hasattr(self.slack, "send_message"):
+            self.slack.send_message(channel, reply)
+        return {"status": "processed", "reply": reply}
 
     def process_message(self, raw_text: str, sender_id: str, sender_name: str, channel: str, message_id: str = "") -> Dict[str, Any]:
         key = message_id or f"{channel}:{sender_id}:{raw_text}"
@@ -111,7 +123,7 @@ class AutomationWorker:
                         key = f"slack:{channel_id}:{ts}"
                         if not self.processed_store.should_process(key):
                             continue
-                        result = self.process_message(text, user, user, channel_id, key)
+                        result = self._handle_slack_message(text, user, user, channel_id, key)
                         if result.get("reply"):
                             self.slack.send_message(channel_id, result["reply"])
             except Exception as exc:

@@ -4,7 +4,11 @@ import os
 from typing import Any, Dict, List
 
 from dotenv import load_dotenv
-from mcp.server.fastmcp import FastMCP
+
+try:
+    from mcp.server.fastmcp import FastMCP
+except ModuleNotFoundError:  # mcp 2.x compatibility
+    from mcp.server.mcpserver import MCPServer as FastMCP
 
 load_dotenv()
 
