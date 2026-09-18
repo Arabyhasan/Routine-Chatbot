@@ -1,0 +1,69 @@
+agent:
+  name: "Routine Agent"
+  timezone: "Asia/Dhaka"
+
+# ─── WHO CAN REQUEST MEETINGS ──────────────────────────────────────────────
+# priority 1–10. Higher = more important.
+# Add anyone you know here; unknown senders get priority 1 automatically.
+
+requesters:
+  bijoy:
+    display_name: "Bijoy"
+    priority: 10
+    relationship: "manager"
+    identifiers:
+      slack_user_id: "U_BIJOY_SLACK_ID"   # fill in from Slack
+      email: "bijoy@talentier.com"         # fill in
+
+  # Example colleague — lower priority, gets alternatives not override
+  # alice:
+  #   display_name: "Alice"
+  #   priority: 4
+  #   relationship: "colleague"
+  #   identifiers:
+  #     slack_user_id: "U_ALICE_ID"
+  #     email: "alice@talentier.com"
+
+  default_unknown:
+    priority: 1
+    relationship: "unknown"
+
+# ─── YOUR COMMITMENT TYPES ─────────────────────────────────────────────────
+# priority: how hard to displace (1 = easy, 10 = never move)
+# reschedulable: can an override move this, or just refuse?
+
+commitments:
+  gym:
+    priority: 2
+    reschedulable: true
+    notes: "Can be moved, not cancelled"
+
+  lunch:
+    priority: 3
+    reschedulable: true
+
+  deep_work:
+    priority: 5
+    reschedulable: true
+    notes: "Protected focus block — only manager can move"
+
+  work_meeting:
+    priority: 7
+    reschedulable: false
+
+  class:
+    priority: 9
+    reschedulable: false
+    notes: "University schedule — fixed, never move"
+
+# ─── CONFLICT RESOLUTION RULES ─────────────────────────────────────────────
+conflict_resolution:
+  # Requester must have AT LEAST this priority to override any commitment
+  manager_override_threshold: 8
+
+  # Even for a manager, only reschedule commitments with priority <= this
+  # (so class at priority 9 is safe even from Bijoy)
+  max_reschedulable_priority: 6
+
+  # How many free-slot alternatives to offer when declining
+  alternative_slots_to_offer: 3
