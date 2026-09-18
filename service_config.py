@@ -23,13 +23,17 @@ class ServiceConfig:
             if os.getenv(f"ENABLE_{service.upper()}", "true").lower() == "true":
                 enabled.append(service)
 
+        slack_channels = [item.strip() for item in os.getenv("SLACK_CHANNEL_IDS", "meeting-times").split(",") if item.strip()]
+        if not slack_channels:
+            slack_channels = ["meeting-times"]
+
         return cls(
             enabled_services=enabled,
             slack_enabled="slack" in enabled,
             gmail_enabled="gmail" in enabled,
             calendar_enabled="calendar" in enabled,
             login_mode=os.getenv("LOGIN_MODE", "interactive"),
-            slack_channel_ids=[item.strip() for item in os.getenv("SLACK_CHANNEL_IDS", "").split(",") if item.strip()],
+            slack_channel_ids=slack_channels,
             gmail_sender_filters=[item.strip() for item in os.getenv("GMAIL_SENDER_FILTERS", "").split(",") if item.strip()],
             requester_priority_overrides={
                 key.strip(): int(value)

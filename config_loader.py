@@ -14,12 +14,18 @@ from typing import Dict, Any, Optional
 class Config:
     def __init__(self, config_path: str = "config.yaml"):
         path = Path(config_path)
-        if not path.exists():
+        search_paths = [path] if path.is_absolute() else [
+            Path.cwd() / path,
+            Path(__file__).resolve().parent / path,
+        ]
+
+        resolved = next((candidate for candidate in search_paths if candidate.exists()), None)
+        if resolved is None:
             raise FileNotFoundError(
-                f"config.yaml not found at {path.resolve()}. "
-                "Make sure you run the agent from the project root."
+                f"config.yaml not found in {', '.join(str(p) for p in search_paths)}. "
+                "Make sure the project root contains config.yaml."
             )
-        with open(path) as f:
+        with open(resolved) as f:
             self._raw = yaml.safe_load(f)
 
     # ── Requester lookup ───────────────────────────────────────────────────

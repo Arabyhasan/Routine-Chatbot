@@ -125,8 +125,54 @@ def parse_recurring_commitment_text(text: str) -> Optional[Dict[str, Any]]:
 
 
 def parse_meeting_request_text(text: str, sender_id: str, sender_name: str, channel: str, raw_message_id: str = "") -> MeetingRequest:
-    """Parse a simple meeting request into a MeetingRequest structure."""
+    """Parse a natural-language meeting request into a MeetingRequest structure."""
     normalized = text.strip().lower()
+    requested_date = date.today()
+
+    if not re.search(r"\b(meeting|meet|schedule|arrange|sync|call|coffee|availability|free for|free at|can we meet|let's meet)\b", normalized):
+        return MeetingRequest(
+            requester_id=sender_id,
+            requester_name=sender_name,
+            channel=channel,
+            message_text=text,
+            requested_date=requested_date,
+            requested_time_slot=None,
+            duration_minutes=60,
+            raw_message_id=raw_message_id,
+        )
+
+    if "tomorrow" in normalized:
+        requested_date = requested_date.replace(day=requested_date.day + 1) if requested_date.day < 28 else requested_date
+
+    lower = normalized
+    if any(word in lower for word in ["at night", "night", "tonight", "this evening", "evening"]):
+        start = datetime.strptime("20:00", "%H:%M").time()
+        end = datetime.strptime("21:00", "%H:%M").time()
+        return MeetingRequest(
+            requester_id=sender_id,
+            requester_name=sender_name,
+            channel=channel,
+            message_text=text,
+            requested_date=requested_date,
+            requested_time_slot=TimeSlot(start=start, end=end),
+            duration_minutes=60,
+            raw_message_id=raw_message_id,
+        )
+
+    if any(word in lower for word in ["morning", "in the morning"]):
+        start = datetime.strptime("09:00", "%H:%M").time()
+        end = datetime.strptime("10:00", "%H:%M").time()
+        return MeetingRequest(
+            requester_id=sender_id,
+            requester_name=sender_name,
+            channel=channel,
+            message_text=text,
+            requested_date=requested_date,
+            requested_time_slot=TimeSlot(start=start, end=end),
+            duration_minutes=60,
+            raw_message_id=raw_message_id,
+        )
+
     time_match = re.search(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", text, re.I)
     if not time_match:
         return MeetingRequest(
@@ -134,7 +180,7 @@ def parse_meeting_request_text(text: str, sender_id: str, sender_name: str, chan
             requester_name=sender_name,
             channel=channel,
             message_text=text,
-            requested_date=None,
+            requested_date=requested_date,
             requested_time_slot=None,
             duration_minutes=60,
             raw_message_id=raw_message_id,
@@ -150,7 +196,6 @@ def parse_meeting_request_text(text: str, sender_id: str, sender_name: str, chan
 
     start = datetime.strptime(f"{hour:02d}:{minute:02d}", "%H:%M").time()
     end = datetime.strptime(f"{(hour + 1) % 24:02d}:{minute:02d}", "%H:%M").time()
-    requested_date = date.today()
 
     return MeetingRequest(
         requester_id=sender_id,

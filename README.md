@@ -1,73 +1,73 @@
 # Routine Agent
 
-A Gemini-first Python assistant for routine management, meeting coordination, and service-aware automation.
+A Gemini-first personal productivity assistant for routine management, meeting coordination, Slack messaging, Gmail drafting, and Google Calendar workflows.
 
 ## Overview
 
-This project builds a personal scheduling and communication assistant that can:
+This project is a practical AI assistant for daily planning and communication. It can:
 
 - understand natural-language scheduling requests,
-- detect and resolve conflicts between meetings and recurring commitments,
-- offer free time suggestions and proposal handling,
-- reschedule lower-priority commitments when higher-priority requests arrive,
-- parse recurring patterns such as "gym every day at 7 except Friday",
-- validate emails before drafting or sending them,
-- interact with Slack, Gmail, and Google Calendar,
-- expose schedule data through an MCP server,
-- use Gemini as the live reasoning engine for chat-based interaction.
+- detect whether the user means a meeting or a plain message,
+- keep a sticky send target for mail vs. Slack DM until it is actually sent,
+- manage recurring commitments and routine updates,
+- suggest and resolve free-time slots,
+- validate email addresses before drafting or sending an email,
+- send Slack channel or DM messages,
+- draft email replies using an AI model and confirm before sending,
+- integrate with Google Calendar and Gmail,
+- reason through chat requests using Gemini as the live intelligence layer.
 
-The design keeps the LLM in the reasoning and interpretation layer while the project’s own scheduling engine remains the execution source of truth.
+The architecture intentionally keeps LLM reasoning on the interpretation layer while the local scheduling engine stays as the execution source of truth.
 
-## Architecture
+## Core capabilities
 
-- `chatbot.py` — main conversational assistant and user entry point
-- `automation_worker.py` — background Slack/Gmail automation loop
-- `knowledge_base.py` — centralized default behavior, runtime policy, and reusable assistant logic
-- `message_parser.py` — extracts meeting times and recurring routine instructions from natural language
-- `priority.py` — conflict resolution and meeting decision logic
-- `availability.py` — free-slot detection and availability checks
-- `routine_manager.py` — routine persistence and updates
-- `models.py` — shared data models for commitments, meeting requests, and decisions
-- `config_loader.py` — config-driven scheduling rules and requester metadata
+### Scheduling and routine management
+- parse recurring instructions like "gym every day at 7 except Friday"
+- load and persist a routine from `routine.json`
+- check availability and free slots for the day
+- detect and resolve conflicts between priorities and commitments
+
+### Natural-language intent handling
+- distinguish between real meeting requests and plain Slack sends
+- keep the target sticky based on the active "send" intent
+- support patterns like "send a mail ..." and "send a dm ..." without misclassifying them as meeting requests
+
+### Communication workflows
+- validate email addresses before drafting/sending a message
+- generate refined email drafts using the AI model layer
+- send Slack messages to the configured channel or DM target
+- connect to Gmail and Google Calendar when credentials are configured
+
+### Knowledge memory
+- remember preferences and facts in a local knowledge base
+- use that context to answer general assistant questions more naturally
+
+## Repository layout
+
+- `chatbot.py` — main conversation and orchestration logic
+- `web_app.py` — browser-based app interface
+- `automation_worker.py` — background automation loop and service routing
 - `slack_integration.py` — Slack API wrapper
-- `google_integration.py` — Gmail and Calendar API wrapper
-- `mcp_server.py` — local MCP tool layer for routine and availability queries
-- `email_agent.py` — validation and draft generation
-- `main.py` — startup entry point for the interactive chatbot
-
-## Core Features
-
-### Scheduling and conflict handling
-The assistant loads recurring commitments from `routine.json` and checks for free slots based on the user’s schedule. If a meeting request conflicts with an existing commitment, the bot evaluates whether the requester has the priority and whether the commitment is reschedulable.
-
-### Recurring commitments
-The parser supports natural-language recurring instructions such as:
-
-- "I have gym every day at 7 except Friday"
-- "Daily workout at 7 pm"
-
-These are turned into structured routine entries and persisted in the local schedule.
-
-### No-meetings-today flow
-When a user says no meetings should be scheduled for the day, the assistant clears conflicts for that day and moves any overlapping items to the next day at the same time where needed.
-
-### Email confirmation flow
-The assistant validates addresses before creating or sending an email. It drafts the message and waits for explicit confirmation before sending it.
-
-### Slack and Gmail automation
-The app can be configured to run the worker in Slack-only, Gmail-only, or combined modes. Messages are processed, routed through the assistant, and sent back to the correct service.
-
-### Gemini-first default routing
-The runtime policy is configured to default to Gemini for the live reasoning layer. The project’s local logic remains the execution layer so the assistant stays predictable and safe.
+- `google_integration.py` — Gmail and Calendar integration
+- `email_agent.py` — email validation and drafting logic
+- `message_parser.py` — natural-language parsing for time and recurring commitments
+- `priority.py` — meeting prioritization and scheduling decisions
+- `availability.py` — free-slot detection
+- `routine_manager.py` — routine persistence and updates
+- `knowledge_base.py` — memory and profile context
+- `mcp_server.py` — local MCP tool layer for schedule queries
+- `config_loader.py` — config-driven runtime settings
+- `service_config.py` — service toggles and defaults
+- `main.py` — interactive console entry point
 
 ## Setup
 
-### Dependencies
+### Requirements
 
-This project is designed for Python 3.12 and uses the local environment installed in the project workspace.
+This project is designed for Python 3.12.
 
 ### Local secrets
-Create a local `.env` file with your credentials, for example:
+Create a local `.env` file with the values you need, for example:
 
 ```env
 GEMINI_API_KEY=your_gemini_key_here
@@ -78,15 +78,21 @@ GOOGLE_CALENDAR_CREDENTIALS_PATH=credentials.json
 GOOGLE_CALENDAR_TOKEN_PATH=token.json
 ```
 
-Do not commit `.env`, token files, or credential files. The repository is configured to ignore them.
+Do not commit `.env`, OAuth token files, or credential files. The repo ignores those paths.
 
-## Run the app
+## Run
 
 ```bash
 python main.py
 ```
 
-## Test the project
+or launch the browser interface:
+
+```bash
+python web_app.py
+```
+
+## Test
 
 ```bash
 python -m pytest -q
@@ -94,4 +100,4 @@ python -m pytest -q
 
 ## Notes
 
-This project was built as a practical scheduling and workflow assistant that blends LLM reasoning with deterministic local logic. That makes it useful for real coordination tasks while keeping operations explainable, testable, and easier to extend by future users.
+This project blends LLM reasoning with deterministic local workflow logic so it remains useful for real coordination tasks without becoming a black box. The result is a practical assistant that can handle scheduling, messaging, and planning in a controlled, verifiable way.

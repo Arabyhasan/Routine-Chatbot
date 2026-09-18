@@ -32,7 +32,35 @@ class SlackIntegration:
         if not self.client:
             return [{"error": "SLACK_BOT_TOKEN is missing"}]
         try:
-            response = self.client.conversations_list()
+            response = self.client.conversations_list(types="public_channel,private_channel,im")
+            return response.get("channels", [])
+        except SlackApiError as exc:
+            return [{"error": str(exc)}]
+
+    def resolve_channel_id(self, target: str) -> str | None:
+        if not self.client or not target:
+            return None
+
+        normalized = target.strip().lower().replace("#", "")
+        if not normalized:
+            return None
+
+        for channel in self.list_channels() + self.list_direct_messages():
+            name = (channel.get("name") or channel.get("user") or "").lower()
+            if name == normalized or name.replace("_", "-") == normalized or name.replace("-", "_") == normalized:
+                return channel.get("id")
+
+        if normalized in {"meeting-times", "meetingtimes"}:
+            for channel in self.list_channels():
+                if (channel.get("name") or "").lower() in {"meeting-times", "meetingtimes"}:
+                    return channel.get("id")
+        return None
+
+    def list_direct_messages(self) -> List[Dict[str, Any]]:
+        if not self.client:
+            return [{"error": "SLACK_BOT_TOKEN is missing"}]
+        try:
+            response = self.client.conversations_list(types="im")
             return response.get("channels", [])
         except SlackApiError as exc:
             return [{"error": str(exc)}]

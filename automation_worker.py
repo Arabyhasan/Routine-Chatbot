@@ -70,7 +70,7 @@ class AutomationWorker:
         reply = self.bot.respond(raw_text)
         if self.slack is not None and hasattr(self.slack, "send_message"):
             self.slack.send_message(channel, reply)
-        return {"status": "processed", "reply": reply}
+        return {"status": "processed", "reply": reply, "channel": channel}
 
     def process_message(self, raw_text: str, sender_id: str, sender_name: str, channel: str, message_id: str = "") -> Dict[str, Any]:
         key = message_id or f"{channel}:{sender_id}:{raw_text}"
@@ -94,6 +94,44 @@ class AutomationWorker:
             "reasoning": decision.reasoning,
         }
 
+    def _poll_slack_once(self, channel_filter: List[str] | None = None) -> None:
+        if not self.service_config.slack_enabled or self.slack is None:
+            return
+
+        active_filter = channel_filter or self.service_config.slack_channel_ids or []
+
+        channels = self.slack.list_channels()
+        direct_messages = self.slack.list_direct_messages() if hasattr(self.slack, "list_direct_messages") else []
+        targets = []
+        seen_targets = set()
+
+        for channel in channels + direct_messages:
+            channel_id = channel.get("id")
+            if not channel_id or channel_id in seen_targets:
+                continue
+            if active_filter and channel_id not in active_filter:
+                continue
+            seen_targets.add(channel_id)
+            targets.append((channel_id, channel.get("name") or channel.get("user") or channel_id))
+
+        for channel_id, _ in targets:
+            try:
+                messages = self.slack.fetch_unread_messages(channel_id)
+            except Exception:
+                continue
+            for message in messages:
+                if message.get("subtype") in {"bot_message", "message_changed"}:
+                    continue
+                text = message.get("text", "")
+                user = message.get("user")
+                if not text or not user:
+                    continue
+                ts = message.get("ts", "")
+                key = f"slack:{channel_id}:{ts}"
+                if not self.processed_store.should_process(key):
+                    continue
+                self._handle_slack_message(text, user, user, channel_id, key)
+
     def listen_for_slack_messages(self, poll_interval: int = 10, channel_filter: List[str] | None = None) -> None:
         if not self.service_config.slack_enabled or self.slack is None:
             print("Slack service disabled for this run; skipping Slack listener.")
@@ -101,31 +139,11 @@ class AutomationWorker:
         if not self.slack.bot_token:
             raise RuntimeError("SLACK_BOT_TOKEN is missing in .env")
 
-        print("Slack automation loop started. Polling for new direct messages and channel activity...")
+        selected_channels = channel_filter or self.service_config.slack_channel_ids or []
+        print(f"Slack automation loop started. Polling for: {selected_channels if selected_channels else 'all channels'}")
         while True:
             try:
-                channels = self.slack.list_channels()
-                for channel in channels:
-                    channel_id = channel.get("id")
-                    if not channel_id:
-                        continue
-                    if channel_filter and channel_id not in channel_filter:
-                        continue
-                    messages = self.slack.fetch_unread_messages(channel_id)
-                    for message in messages:
-                        if message.get("subtype") in {"bot_message", "message_changed"}:
-                            continue
-                        text = message.get("text", "")
-                        user = message.get("user")
-                        if not text or not user:
-                            continue
-                        ts = message.get("ts", "")
-                        key = f"slack:{channel_id}:{ts}"
-                        if not self.processed_store.should_process(key):
-                            continue
-                        result = self._handle_slack_message(text, user, user, channel_id, key)
-                        if result.get("reply"):
-                            self.slack.send_message(channel_id, result["reply"])
+                self._poll_slack_once(channel_filter=selected_channels)
             except Exception as exc:
                 print(f"Slack poll error: {exc}")
             time.sleep(poll_interval)

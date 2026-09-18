@@ -1,3 +1,4 @@
+import uuid
 from datetime import date
 
 from automation_worker import AutomationWorker
@@ -191,6 +192,193 @@ def test_chatbot_requires_confirmation_before_sending_email():
     assert "confirm" in bot.respond("send it").lower()
 
 
+def test_chatbot_does_not_treat_regular_chat_as_meeting_request():
+    bot = RoutineChatbot()
+    response = bot.respond("Hi there, how are you doing today?")
+    assert "routine" in response.lower() or "help" in response.lower()
+    assert "that time works for me" not in response.lower()
+
+
+def test_llm_classifies_ambiguous_availability_message_as_meeting_request(monkeypatch):
+    bot = RoutineChatbot()
+
+    class DummyResponse:
+        status_code = 200
+
+        def json(self):
+            return {"candidates": [{"content": {"parts": [{"text": '{"meeting_request": true}'}]}}]}
+
+    def fake_post(url, json, timeout=None):
+        return DummyResponse()
+
+    import requests
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    assert bot._looks_like_meeting_request("I am free tomorrow after 3pm") is True
+
+
+def test_chatbot_understands_natural_language_meeting_times(monkeypatch):
+    bot = RoutineChatbot()
+
+    class DummyResponse:
+        status_code = 200
+
+        def json(self):
+            return {"candidates": [{"content": {"parts": [{"text": '{"date": "2026-09-19", "time": "21:00"}'}]}}]}
+
+    def fake_post(url, json, timeout=None):
+        return DummyResponse()
+
+    import requests
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    parsed = bot._parse_time_from_text("Can we meet at 8 at night today?")
+    assert parsed is not None
+    assert parsed.start.hour == 20
+    assert parsed.end.hour == 21
+
+    meeting = bot.respond("Please arrange a meeting tomorrow at 9am")
+    assert "tomorrow" in meeting.lower() or "9" in meeting
+
+
+def test_automation_worker_processes_slack_direct_messages():
+    worker = AutomationWorker(
+        config_path="config.yaml",
+        routine_path="routine.json",
+        service_config=ServiceConfig(enabled_services=["slack"], slack_enabled=True, gmail_enabled=False, calendar_enabled=False),
+    )
+    worker.processed_store.should_process = lambda key: True
+    worker.bot.respond = lambda text: "Meeting request handled in DM."
+
+    calls = []
+    worker.slack.list_channels = lambda: [{"id": "C123"}]
+    worker.slack.list_direct_messages = lambda: [{"id": "D456"}]
+    worker.slack.fetch_unread_messages = lambda channel_id: [
+        {"text": "Can we meet at 8pm?", "user": "U1", "ts": "99", "subtype": None}
+    ] if channel_id == "D456" else []
+    worker.slack.send_message = lambda channel_id, text: calls.append((channel_id, text))
+
+    worker._poll_slack_once()
+
+    assert len(calls) == 1
+    assert calls[0][0] == "D456"
+    assert "Meeting request handled in DM." in calls[0][1]
+
+
+def test_chatbot_sends_slack_dm_to_meeting_times_channel():
+    service_config = ServiceConfig(enabled_services=["slack"], slack_enabled=True, gmail_enabled=False, calendar_enabled=False)
+    bot = RoutineChatbot(service_config=service_config)
+    calls = []
+
+    class DummySlack:
+        def resolve_channel_id(self, target):
+            return "CMEETING" if target in {"meeting-times", "#meeting-times"} else None
+
+        def send_message(self, channel_id, text):
+            calls.append((channel_id, text))
+            return {"ok": True}
+
+    bot.slack = DummySlack()
+
+    response = bot.respond("Send a DM to Slack saying we have a meeting at 8 today.")
+
+    assert calls == [("CMEETING", "We have a meeting at 8 today.")]
+    assert "sent" in response.lower()
+
+
+def test_slack_send_command_is_not_treated_as_meeting_request():
+    service_config = ServiceConfig(enabled_services=["slack"], slack_enabled=True, gmail_enabled=False, calendar_enabled=False)
+    bot = RoutineChatbot(service_config=service_config)
+    calls = []
+
+    class DummySlack:
+        def resolve_channel_id(self, target):
+            return "CMEETING" if target in {"meeting-times", "#meeting-times"} else None
+
+        def send_message(self, channel_id, text):
+            calls.append((channel_id, text))
+            return {"ok": True}
+
+    bot.slack = DummySlack()
+    response = bot.respond("send a dm to slack meeting at 8 am")
+
+    assert calls == [("CMEETING", "Meeting at 8 am")]
+    assert "Slack message sent" in response
+    assert "That time works for me" not in response
+
+
+def test_llm_intent_router_distinguishes_slack_message_from_meeting_request(monkeypatch):
+    service_config = ServiceConfig(enabled_services=["slack"], slack_enabled=True, gmail_enabled=False, calendar_enabled=False)
+    bot = RoutineChatbot(service_config=service_config)
+    calls = []
+
+    class DummySlack:
+        def resolve_channel_id(self, target):
+            return "CMEETING" if target in {"meeting-times", "#meeting-times"} else None
+
+        def send_message(self, channel_id, text):
+            calls.append((channel_id, text))
+            return {"ok": True}
+
+    bot.slack = DummySlack()
+
+    class DummyResponse:
+        def __init__(self, payload):
+            self.status_code = 200
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    def fake_post(url, json, timeout=None):
+        return DummyResponse({
+            "candidates": [{
+                "content": {"parts": [{"text": '{"action": "send_slack_message"}'}]}
+            }]
+        })
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr("requests.post", fake_post)
+
+    result = bot._llm_classify_user_action("send a dm to slack meeting at 8 am")
+    assert result["action"] == "send_slack_message"
+
+    response = bot.respond("send a dm to slack meeting at 8 am")
+    assert calls == [("CMEETING", "Meeting at 8 am")]
+    assert "Slack message sent" in response
+
+
+def test_send_target_is_sticky_until_send_or_explicit_override():
+    service_config = ServiceConfig(enabled_services=["slack", "gmail"], slack_enabled=True, gmail_enabled=False, calendar_enabled=False)
+    bot = RoutineChatbot(service_config=service_config)
+    calls = []
+
+    class DummySlack:
+        def resolve_channel_id(self, target):
+            return "CMEETING" if target in {"meeting-times", "#meeting-times"} else None
+
+        def send_message(self, channel_id, text):
+            calls.append((channel_id, text))
+            return {"ok": True}
+
+    bot.slack = DummySlack()
+
+    first = bot.respond("send a heartfelt mail to person@example.com and ask when they are free")
+    assert "Draft ready for person@example.com" in first
+    assert bot.pending_send_target == "mail"
+
+    second = bot.respond("say that dm me when you can")
+    assert "Draft ready for person@example.com" in second
+    assert bot.pending_send_target == "mail"
+
+    third = bot.respond("cancel mail and send dm to slack saying we have a meeting at 8 today")
+    assert calls == [("CMEETING", "We have a meeting at 8 today")]
+    assert "Slack message sent" in third
+    assert bot.pending_send_target is None
+
+
 def test_claude_agent_uses_anthropic_api_when_key_is_present(monkeypatch):
     import email_agent
 
@@ -291,7 +479,7 @@ def test_worker_routes_real_slack_message_through_llm_chatbot():
     worker.bot = DummyBot()
     worker.slack = DummySlack()
 
-    unique_key = "ts-llm-listener-20260918-unique"
+    unique_key = f"ts-llm-listener-{uuid.uuid4()}"
     result = worker._handle_slack_message("Can we meet at 8pm?", "U123", "Alice", "C123", unique_key)
 
     assert result["reply"] == "Gemini response for channel message"
