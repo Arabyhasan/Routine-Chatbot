@@ -459,6 +459,21 @@ class RoutineChatbot:
     def _is_exact_mail_to_dm_override(self, text: str) -> bool:
         return bool(re.search(r"\bcancel\s+mail\s+and\s+send\s+(?:a\s+)?dm\b", (text or "").lower()))
 
+    def _is_explicit_send_action(self, text: str) -> bool:
+        lower = (text or "").lower()
+        if "send" not in lower:
+            return False
+        if any(phrase in lower for phrase in [
+            "schedule a meeting",
+            "arrange a meeting",
+            "can we meet",
+            "book a meeting",
+            "let's meet",
+            "meeting request",
+        ]):
+            return False
+        return any(token in lower for token in ["mail", "email", "dm", "slack", "message", "send to slack", "send a dm", "send a mail", "send email"])
+
     def _handle_reschedule(self, text: str) -> str:
         lower = text.lower()
 
@@ -635,6 +650,18 @@ class RoutineChatbot:
         save_routine(commitments, self.routine_path)
         return f"Added {parsed['title']} at {parsed['start_time']} for the recurring days you described."
 
+    def _is_explicit_slack_send_message(self, text: str) -> bool:
+        lower = (text or "").lower()
+        has_send_intent = any(keyword in lower for keyword in [
+            "send a dm", "send a message", "send dm", "dm to slack", "message to slack",
+            "post to slack", "send to slack", "message in slack", "to slack saying",
+            "to slack say", "post to #meeting-times", "send a message to #meeting-times",
+            "send a dm to slack", "send dm to slack", "send a message to slack", "send message to slack",
+        ])
+        has_channel_target = "slack" in lower or "meeting-times" in lower or "#meeting-times" in lower or "meeting times" in lower or "channel" in lower
+        has_message_body = "saying" in lower or "say " in lower or "message in slack" in lower or "to slack" in lower
+        return has_send_intent and has_channel_target and has_message_body
+
     def _handle_slack_send_message(self, text: str) -> str | None:
         lower_text = text.lower()
         if self.slack is None:
@@ -650,7 +677,8 @@ class RoutineChatbot:
         if not (has_send_intent or has_channel_target):
             return None
         if any(phrase in lower_text for phrase in ["can we meet", "schedule a meeting", "arrange a meeting", "let's meet", "meeting request", "book a meeting"]):
-            return None
+            if not self._is_explicit_slack_send_message(text):
+                return None
 
         target = "meeting-times"
         for candidate in ["meeting-times", "#meeting-times", "meeting times"]:
@@ -709,6 +737,16 @@ class RoutineChatbot:
                 if email_response and email_response.strip():
                     return email_response
 
+        if self._is_explicit_send_action(text):
+            if any(token in lower_text for token in ["mail", "email"]):
+                email_response = self._handle_email(text)
+                if email_response and email_response.strip():
+                    return email_response
+            if any(token in lower_text for token in ["dm", "slack", "message", "channel"]):
+                slack_send_response = self._handle_slack_send_message(text)
+                if slack_send_response:
+                    return slack_send_response
+
         llm_action = self._llm_classify_user_action(text)
         if llm_action.get("action") == "send_slack_message":
             slack_send_response = self._handle_slack_send_message(text)
@@ -759,8 +797,17 @@ class RoutineChatbot:
         if not text:
             return "I can help with your routine. Ask: 'When am I free today?', 'Can we meet at 8pm?', or 'Show my schedule.'"
 
+        if self._is_explicit_slack_send_message(text):
+            slack_send_response = self._handle_slack_send_message(text)
+            if slack_send_response:
+                return slack_send_response
+
         if any(word in lower_text for word in ["#general", "slack", "channel"]) or self._looks_like_meeting_request(lower_text):
             if self._looks_like_meeting_request(lower_text):
+                if self._is_explicit_slack_send_message(text):
+                    slack_send_response = self._handle_slack_send_message(text)
+                    if slack_send_response:
+                        return slack_send_response
                 day = date.today()
                 requested_time = self._parse_time_from_text(lower_text)
                 if requested_time is None:

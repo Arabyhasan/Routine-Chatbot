@@ -288,6 +288,27 @@ def test_chatbot_sends_slack_dm_to_meeting_times_channel():
     assert "sent" in response.lower()
 
 
+def test_slack_message_with_meeting_time_is_not_scheduled_when_it_is_a_plain_send():
+    service_config = ServiceConfig(enabled_services=["slack"], slack_enabled=True, gmail_enabled=False, calendar_enabled=False)
+    bot = RoutineChatbot(service_config=service_config)
+    calls = []
+
+    class DummySlack:
+        def resolve_channel_id(self, target):
+            return "CMEETING" if target in {"meeting-times", "#meeting-times"} else None
+
+        def send_message(self, channel_id, text):
+            calls.append((channel_id, text))
+            return {"ok": True}
+
+    bot.slack = DummySlack()
+    response = bot.respond("send a dm to slack saying meeting at 8 am")
+
+    assert calls == [("CMEETING", "Meeting at 8 am")]
+    assert "Slack message sent" in response
+    assert "That time works for me" not in response
+
+
 def test_slack_send_command_is_not_treated_as_meeting_request():
     service_config = ServiceConfig(enabled_services=["slack"], slack_enabled=True, gmail_enabled=False, calendar_enabled=False)
     bot = RoutineChatbot(service_config=service_config)
@@ -306,6 +327,36 @@ def test_slack_send_command_is_not_treated_as_meeting_request():
 
     assert calls == [("CMEETING", "Meeting at 8 am")]
     assert "Slack message sent" in response
+    assert "That time works for me" not in response
+
+
+def test_strict_slack_send_guard_keeps_meeting_like_messages_as_posts():
+    service_config = ServiceConfig(enabled_services=["slack"], slack_enabled=True, gmail_enabled=False, calendar_enabled=False)
+    bot = RoutineChatbot(service_config=service_config)
+    calls = []
+
+    class DummySlack:
+        def resolve_channel_id(self, target):
+            return "CMEETING" if target in {"meeting-times", "#meeting-times"} else None
+
+        def send_message(self, channel_id, text):
+            calls.append((channel_id, text))
+            return {"ok": True}
+
+    bot.slack = DummySlack()
+    response = bot.respond("send a dm to slack saying can we meet at 8")
+
+    assert calls == [("CMEETING", "Can we meet at 8")]
+    assert "Slack message sent" in response
+    assert "That time works for me" not in response
+
+
+def test_explicit_email_send_with_meeting_time_is_kept_as_email():
+    service_config = ServiceConfig(enabled_services=["slack"], slack_enabled=True, gmail_enabled=False, calendar_enabled=False)
+    bot = RoutineChatbot(service_config=service_config)
+    response = bot.respond("send a mail to jane@example.com saying meeting at 8 am")
+
+    assert "Draft ready for jane@example.com" in response
     assert "That time works for me" not in response
 
 
