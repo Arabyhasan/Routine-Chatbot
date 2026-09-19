@@ -16,12 +16,26 @@ from typing import Any, Dict, List
 from dotenv import load_dotenv
 load_dotenv()
 
-from mcp.server.fastmcp import FastMCP
 from mcp_tools import ToolContext, execute as _execute
 from config_loader import Config
 from service_config import ServiceConfig
 
-mcp = FastMCP("routine-agent")
+# mcp v1 uses FastMCP; v2 renamed it to MCPServer.
+# The web chatbot doesn't need mcp at all — this file is only for Claude Desktop.
+# Pin to mcp<2 in requirements.txt; this guard handles both just in case.
+try:
+    from mcp.server.fastmcp import FastMCP
+    mcp = FastMCP("routine-agent")
+except (ImportError, ModuleNotFoundError):
+    try:
+        from mcp.server.mcpserver import MCPServer as FastMCP  # type: ignore[no-redef]
+        mcp = FastMCP("routine-agent")
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise SystemExit(
+            f"mcp package not installed or incompatible version ({exc}).\n"
+            "Install with: pip install 'mcp<2'\n"
+            "The web chatbot (web_app.py) works without this."
+        ) from exc
 
 
 def _ctx() -> ToolContext:
