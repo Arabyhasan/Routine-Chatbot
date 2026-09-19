@@ -1,103 +1,165 @@
 # Routine Agent
 
-A Gemini-first personal productivity assistant for routine management, meeting coordination, Slack messaging, Gmail drafting, and Google Calendar workflows.
+An AI scheduling assistant powered by Claude — monitors Slack and Gmail for meeting requests, manages a priority-based routine, auto-replies, and keeps your schedule updated.
 
-## Overview
+Built as an internship project at Talentier to explore Claude tool-use, MCP server integration, and autonomous agent workflows.
 
-This project is a practical AI assistant for daily planning and communication. It can:
+---
 
-- understand natural-language scheduling requests,
-- detect whether the user means a meeting or a plain message,
-- keep a sticky send target for mail vs. Slack DM until it is actually sent,
-- manage recurring commitments and routine updates,
-- suggest and resolve free-time slots,
-- validate email addresses before drafting or sending an email,
-- send Slack channel or DM messages,
-- draft email replies using an AI model and confirm before sending,
-- integrate with Google Calendar and Gmail,
-- reason through chat requests using Gemini as the live intelligence layer.
+## What it does
 
-The architecture intentionally keeps LLM reasoning on the interpretation layer while the local scheduling engine stays as the execution source of truth.
+- **Understands natural language** — "can we meet at 8pm?" gets parsed, checked against your routine, and replied to automatically
+- **Priority-based conflict resolution** — a manager requesting your gym slot overrides it and reschedules; an unknown requester gets a polite decline with free-slot alternatives
+- **Reads and writes your routine** — commitments live in `routine.json` and get updated when meetings are confirmed or rescheduled
+- **Sends Slack messages and emails** — drafts via Claude, confirms before sending
+- **Remembers context** — conversation history is kept across turns so follow-up messages work naturally
+- **MCP server** — exposes all scheduling tools to Claude Desktop or any MCP-compatible host
 
-## Core capabilities
+---
 
-### Scheduling and routine management
-- parse recurring instructions like "gym every day at 7 except Friday"
-- load and persist a routine from `routine.json`
-- check availability and free slots for the day
-- detect and resolve conflicts between priorities and commitments
+## Architecture
 
-### Natural-language intent handling
-- distinguish between real meeting requests and plain Slack sends
-- keep the target sticky based on the active "send" intent
-- support patterns like "send a mail ..." and "send a dm ..." without misclassifying them as meeting requests
+```
+User message
+    ↓
+Claude (claude-haiku-4-5) — reads intent, decides which tools to call
+    ↓
+mcp_tools.py — single source of truth for all tool logic
+    ↓   ↓   ↓   ↓
+routine  slack  gmail  priority engine
+    ↓
+Claude — formulates natural language reply
+    ↓
+User
+```
 
-### Communication workflows
-- validate email addresses before drafting/sending a message
-- generate refined email drafts using the AI model layer
-- send Slack messages to the configured channel or DM target
-- connect to Gmail and Google Calendar when credentials are configured
+All tool implementations live in `mcp_tools.py`. Both the web chatbot (`chatbot.py`) and the MCP server (`mcp_server.py`) call the same functions — change a tool once, updated everywhere.
 
-### Knowledge memory
-- remember preferences and facts in a local knowledge base
-- use that context to answer general assistant questions more naturally
+---
 
-## Repository layout
+## Priority system
 
-- `chatbot.py` — main conversation and orchestration logic
-- `web_app.py` — browser-based app interface
-- `automation_worker.py` — background automation loop and service routing
-- `slack_integration.py` — Slack API wrapper
-- `google_integration.py` — Gmail and Calendar integration
-- `email_agent.py` — email validation and drafting logic
-- `message_parser.py` — natural-language parsing for time and recurring commitments
-- `priority.py` — meeting prioritization and scheduling decisions
-- `availability.py` — free-slot detection
-- `routine_manager.py` — routine persistence and updates
-- `knowledge_base.py` — memory and profile context
-- `mcp_server.py` — local MCP tool layer for schedule queries
-- `config_loader.py` — config-driven runtime settings
-- `service_config.py` — service toggles and defaults
-- `main.py` — interactive console entry point
+Defined entirely in `config.yaml` — no hardcoded logic.
+
+Two dimensions:
+- **Requester priority** (1–10): Bijoy (manager) = 10, unknown = 1
+- **Commitment priority** (1–10): gym = 2, class = 9
+
+Override rule: if `requester_priority >= manager_override_threshold` AND the commitment is reschedulable AND its priority is below the sacred threshold → reschedule and confirm. Otherwise → decline and offer free slots.
+
+---
+
+## Tools available to Claude
+
+| Tool | What it does |
+|---|---|
+| `read_schedule` | Load commitments for a day |
+| `check_time_slot` | Is a specific time free? |
+| `get_free_slots` | What times are open today? |
+| `schedule_meeting` | Book via priority engine |
+| `reschedule_commitment` | Move an existing item |
+| `cancel_commitment` | Remove from routine |
+| `add_recurring_commitment` | Add gym every weekday at 8pm |
+| `send_slack_message` | Post to a Slack channel |
+| `send_email` | Draft + optionally send via Gmail |
+| `confirm_pending_email` | Confirm or cancel a pending draft |
+| `remember_fact` | Store a preference or fact |
+| `recall_memory` | Recall stored context |
+| `get_configured_requesters` | Show priority config |
+| `health_check` | Check which services are connected |
+
+---
 
 ## Setup
 
-### Requirements
+**Requirements:** Python 3.11+
 
-This project is designed for Python 3.12.
+```bash
+pip install anthropic python-dotenv pyyaml slack-sdk google-auth google-auth-oauthlib google-api-python-client mcp
+```
 
-### Local secrets
-Create a local `.env` file with the values you need, for example:
+Create a `.env` file:
 
 ```env
-GEMINI_API_KEY=your_gemini_key_here
-SLACK_BOT_TOKEN=your_slack_bot_token
-SLACK_APP_TOKEN=your_slack_app_token
-SLACK_SIGNING_SECRET=your_slack_signing_secret
+# Required
+ANTHROPIC_API_KEY=sk-ant-...
+
+# Optional
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_CHANNEL_IDS=meeting-times,general
+
+# Optional — run `python google_integration.py` to generate token.json
 GOOGLE_CALENDAR_CREDENTIALS_PATH=credentials.json
 GOOGLE_CALENDAR_TOKEN_PATH=token.json
 ```
 
-Do not commit `.env`, OAuth token files, or credential files. The repo ignores those paths.
+---
 
 ## Run
 
-```bash
-python main.py
-```
-
-or launch the browser interface:
-
+**Web chatbot** (http://localhost:8000):
 ```bash
 python web_app.py
 ```
 
-## Test
+**Terminal mode:**
+```bash
+python chatbot.py
+```
 
+**MCP server** (for Claude Desktop):
+```bash
+python mcp_server.py
+```
+
+**Tests:**
 ```bash
 python -m pytest -q
 ```
 
-## Notes
+---
 
-This project blends LLM reasoning with deterministic local workflow logic so it remains useful for real coordination tasks without becoming a black box. The result is a practical assistant that can handle scheduling, messaging, and planning in a controlled, verifiable way.
+## File layout
+
+| File | Role |
+|---|---|
+| `chatbot.py` | Claude agent loop — tool-use orchestration |
+| `mcp_tools.py` | All tool implementations (single source of truth) |
+| `mcp_server.py` | MCP server — thin wrappers around mcp_tools.py |
+| `web_app.py` | Browser UI at localhost:8000 |
+| `priority.py` | Conflict resolution engine |
+| `availability.py` | Free slot detection |
+| `routine_manager.py` | Read/write routine.json |
+| `config_loader.py` | Load config.yaml |
+| `email_agent.py` | Email drafting via Claude |
+| `slack_integration.py` | Slack API wrapper |
+| `google_integration.py` | Gmail and Calendar integration |
+| `knowledge_base.py` | Memory and preferences |
+| `config.yaml` | Priority rules and requester config |
+| `routine.json` | Your schedule (editable directly) |
+
+---
+
+## Config
+
+Edit `config.yaml` to change behavior — no code changes needed:
+
+```yaml
+requesters:
+  bijoy:
+    display_name: "Bijoy"
+    priority: 10          # manager — can override gym, deep work, etc.
+    relationship: "manager"
+
+commitments:
+  gym:
+    priority: 2           # low — can be moved by high-priority requesters
+    reschedulable: true
+  class:
+    priority: 9           # high — never moved, even by manager
+    reschedulable: false
+
+conflict_resolution:
+  manager_override_threshold: 8   # requester needs >= this to override anything
+  max_reschedulable_priority: 6   # only reschedule commitments at or below this
+```

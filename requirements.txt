@@ -1,0 +1,10 @@
+anthropic
+python-dotenv
+pyyaml
+slack-sdk
+requests
+mcp>=1.0,<2.0
+google-auth
+google-auth-oauthlib
+google-api-python-client
+pytest

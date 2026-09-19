@@ -1,67 +1,172 @@
+"""
+mcp_server.py — MCP server. Thin wrappers around mcp_tools.py.
+
+The actual logic lives in mcp_tools.py — both this file and chatbot.py
+call the same functions. Change a tool once, updated everywhere.
+
+Usage:
+  python mcp_server.py          # stdio transport (for Claude Desktop / MCP hosts)
+  mcp dev mcp_server.py         # MCP inspector for debugging
+"""
 from __future__ import annotations
 
 import os
 from typing import Any, Dict, List
 
 from dotenv import load_dotenv
-
-try:
-    from mcp.server.fastmcp import FastMCP
-except ModuleNotFoundError:  # mcp 2.x compatibility
-    from mcp.server.mcpserver import MCPServer as FastMCP
-
 load_dotenv()
 
-mcp = FastMCP("routine-agent")
+from mcp_tools import ToolContext, execute as _execute
+from config_loader import Config
+from service_config import ServiceConfig
 
+# mcp v1 uses FastMCP; v2 renamed it to MCPServer.
+# The web chatbot doesn't need mcp at all — this file is only for Claude Desktop.
+# Pin to mcp<2 in requirements.txt; this guard handles both just in case.
+try:
+    from mcp.server.fastmcp import FastMCP
+    mcp = FastMCP("routine-agent")
+except (ImportError, ModuleNotFoundError):
+    try:
+        from mcp.server.mcpserver import MCPServer as FastMCP  # type: ignore[no-redef]
+        mcp = FastMCP("routine-agent")
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise SystemExit(
+            f"mcp package not installed or incompatible version ({exc}).\n"
+            "Install with: pip install 'mcp<2'\n"
+            "The web chatbot (web_app.py) works without this."
+        ) from exc
+
+
+def _ctx() -> ToolContext:
+    """Build a ToolContext for each MCP call (stateless — no persistent connection)."""
+    svc = ServiceConfig.from_env()
+    slack = None
+    google = None
+    if svc.slack_enabled:
+        try:
+            from slack_integration import SlackIntegration
+            slack = SlackIntegration()
+        except Exception:
+            pass
+    if svc.gmail_enabled or svc.calendar_enabled:
+        try:
+            from google_integration import GoogleIntegration
+            google = GoogleIntegration()
+        except Exception:
+            pass
+    return ToolContext(
+        config=Config("config.yaml"),
+        routine_path="routine.json",
+        slack=slack,
+        google=google,
+        service_config=svc,
+    )
+
+
+def _call(tool_name: str, **kwargs) -> str:
+    return _execute(_ctx(), tool_name, kwargs)
+
+
+# ─── MCP tool registrations ───────────────────────────────────────────────────
 
 @mcp.tool()
-def get_routine_summary() -> str:
-    """Return a quick summary of the local routine JSON file."""
-    from routine_manager import load_routine
-
-    commitments = load_routine("routine.json")
-    if not commitments:
-        return "No commitments loaded."
-
-    summary = []
-    for c in commitments:
-        summary.append(f"{c.title}: {c.time_slot.pretty()} on {', '.join(d.value for d in c.days)}")
-    return "\n".join(summary)
-
+def read_schedule(day: str = "today") -> str:
+    """Get the user's schedule for a specific day."""
+    return _call("read_schedule", day=day)
 
 @mcp.tool()
-def get_free_slots_for_today() -> List[str]:
-    """Return the demo free slots for today using the same scheduling logic."""
-    from datetime import date
-    from availability import get_free_slots
-    from routine_manager import load_routine
-
-    commitments = load_routine("routine.json")
-    slots = get_free_slots(date.today(), commitments, duration_minutes=60)
-    return [slot.pretty() for slot in slots[:5]]
-
+def check_time_slot(time: str, duration_minutes: int = 60, day: str = "today") -> str:
+    """Check if the user is free at a given time."""
+    return _call("check_time_slot", time=time, duration_minutes=duration_minutes, day=day)
 
 @mcp.tool()
-def get_configured_requesters() -> Dict[str, Any]:
-    """Expose requester metadata as an MCP tool."""
-    import yaml
-
-    with open("config.yaml", "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
-    return data.get("requesters", {})
-
+def check_availability(time_str: str, duration_minutes: int = 60) -> Dict[str, Any]:
+    """Check availability — alias used by some MCP clients."""
+    text = _call("check_time_slot", time=time_str, duration_minutes=duration_minutes, day="today")
+    return {"result": text}
 
 @mcp.tool()
-def health_check() -> Dict[str, str]:
-    """Simple server health check for local testing."""
-    return {
-        "status": "ok",
-        "service": "routine-agent-mcp",
-        "slack_configured": bool(os.getenv("SLACK_BOT_TOKEN")),
-        "gmail_configured": bool(os.getenv("GMAIL_CLIENT_ID") and os.getenv("GMAIL_CLIENT_SECRET")),
-        "calendar_configured": bool(os.getenv("GOOGLE_CALENDAR_CREDENTIALS_PATH")),
-    }
+def get_free_slots(day: str = "today", duration_minutes: int = 60) -> str:
+    """List free time slots on a given day."""
+    return _call("get_free_slots", day=day, duration_minutes=duration_minutes)
+
+@mcp.tool()
+def get_free_slots_for_today(duration_minutes: int = 60) -> List[str]:
+    """Get free slots for today (convenience alias)."""
+    return [_call("get_free_slots", day="today", duration_minutes=duration_minutes)]
+
+@mcp.tool()
+def schedule_meeting(
+    title: str,
+    time: str,
+    duration_minutes: int = 60,
+    requester_id: str = "unknown",
+    day: str = "today",
+) -> str:
+    """Schedule a meeting through the priority engine."""
+    return _call("schedule_meeting", title=title, time=time,
+                 duration_minutes=duration_minutes, requester_id=requester_id, day=day)
+
+@mcp.tool()
+def reschedule_commitment(commitment_title: str, new_time: str) -> str:
+    """Move an existing commitment to a new time."""
+    return _call("reschedule_commitment", commitment_title=commitment_title, new_time=new_time)
+
+@mcp.tool()
+def cancel_commitment(commitment_title: str) -> str:
+    """Remove a commitment from the routine."""
+    return _call("cancel_commitment", commitment_title=commitment_title)
+
+@mcp.tool()
+def add_recurring_commitment(
+    title: str,
+    time: str,
+    days: List[str],
+    commitment_type: str = "work_meeting",
+    duration_minutes: int = 60,
+) -> str:
+    """Add a new recurring commitment."""
+    return _call("add_recurring_commitment", title=title, time=time, days=days,
+                 commitment_type=commitment_type, duration_minutes=duration_minutes)
+
+@mcp.tool()
+def add_commitment_to_routine(
+    title: str,
+    time_str: str,
+    days: List[str],
+    commitment_type: str = "work_meeting",
+    duration_minutes: int = 60,
+) -> str:
+    """Add a recurring commitment (alias with time_str param for compatibility)."""
+    return _call("add_recurring_commitment", title=title, time=time_str, days=days,
+                 commitment_type=commitment_type, duration_minutes=duration_minutes)
+
+@mcp.tool()
+def send_slack_message(channel: str, message: str) -> str:
+    """Send a message to a Slack channel."""
+    return _call("send_slack_message", channel=channel, message=message)
+
+@mcp.tool()
+def send_email(
+    to_email: str,
+    context: str,
+    subject: str = "Message from your assistant",
+    send_now: bool = False,
+) -> str:
+    """Draft (and optionally send) an email."""
+    return _call("send_email", to_email=to_email, context=context,
+                 subject=subject, send_now=send_now)
+
+@mcp.tool()
+def get_configured_requesters() -> str:
+    """Show known requesters and their priority levels."""
+    return _call("get_configured_requesters")
+
+@mcp.tool()
+def health_check() -> str:
+    """Check which services are configured and working."""
+    return _call("health_check")
 
 
 if __name__ == "__main__":
