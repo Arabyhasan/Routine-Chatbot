@@ -1,906 +1,782 @@
+"""
+chatbot.py — Routine Agent powered by Claude tool-use.
+
+Architecture (what was wrong before, what's fixed):
+  BEFORE: 170-line if/else chain → Gemini (model probing fails) → same canned reply every time
+  AFTER:  User message → Claude with tool definitions → Claude calls tools → Claude responds
+
+Claude is the orchestrator. It reads the user's intent and decides which tools to call.
+Tools are the existing business logic (routine_manager, availability, priority, slack, email).
+No giant if/else chain. No silent failures. Conversation history is kept for context.
+"""
 from __future__ import annotations
 
 import json
 import os
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
-import requests
 from dotenv import load_dotenv
 
 load_dotenv()
 
-from availability import get_free_slots
+from availability import get_free_slots, is_slot_free
 from config_loader import Config
-from email_agent import ClaudeAgent, IntentAgent, validate_email_address
 from google_integration import GoogleIntegration
-from knowledge_base import UserKnowledgeBase
-from models import DayOfWeek, MeetingRequest, TimeSlot
+from models import DayOfWeek, MeetingRequest, TimeSlot, Commitment
 from priority import handle_meeting_request
 from routine_manager import load_routine, save_routine
-from service_config import ServiceConfig, prompt_service_selection
+from service_config import ServiceConfig
 from slack_integration import SlackIntegration
 
 
-class MCPToolClient:
-    """Minimal MCP client wrapper for the local FastMCP server."""
+# ─── Tool definitions for Claude ─────────────────────────────────────────────
+# Claude reads these and decides which to call. Change these to add capabilities.
 
-    def __init__(self, server_path: str = "mcp_server.py"):
-        self.server_path = server_path
-        self._client = None
-
-    def _ensure_initialized(self):
-        if self._client is not None:
-            return self._client
-
-        try:
-            from mcp import ClientSession
-            from mcp.client.stdio import stdio_client, StdioServerParameters
-
-            params = StdioServerParameters(command="python", args=[self.server_path], env=None)
-            self._client = {"session": None, "params": params}
-        except Exception:
-            self._client = {"session": None, "params": None}
-        return self._client
-
-    def get_routine_summary(self):
-        try:
-            if self._ensure_initialized()["params"] is None:
-                return None
-            from mcp import ClientSession
-            from mcp.client.stdio import stdio_client
-
-            async def _runner():
-                async with stdio_client(self._ensure_initialized()["params"]) as (read, write):
-                    async with ClientSession(read, write) as session:
-                        await session.initialize()
-                        result = await session.call_tool("get_routine_summary", {})
-                        return result
-
-            import asyncio
-            return asyncio.run(_runner())
-        except Exception:
-            return None
-
-    def get_free_slots_for_today(self):
-        try:
-            if self._ensure_initialized()["params"] is None:
-                return None
-            from mcp import ClientSession
-            from mcp.client.stdio import stdio_client
-
-            async def _runner():
-                async with stdio_client(self._ensure_initialized()["params"]) as (read, write):
-                    async with ClientSession(read, write) as session:
-                        await session.initialize()
-                        result = await session.call_tool("get_free_slots_for_today", {})
-                        return result
-
-            import asyncio
-            return asyncio.run(_runner())
-        except Exception:
-            return None
+TOOLS = [
+    {
+        "name": "read_schedule",
+        "description": (
+            "Read the user's schedule and commitments for a specific day. "
+            "Always call this first when the user asks about their day, routine, or schedule."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "day": {
+                    "type": "string",
+                    "description": "Which day: 'today', 'tomorrow', 'monday', 'tuesday', etc."
+                }
+            },
+            "required": ["day"]
+        }
+    },
+    {
+        "name": "check_time_slot",
+        "description": (
+            "Check if the user is free at a specific time on a specific day. "
+            "Call this before scheduling anything to see if there's a conflict."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "time": {
+                    "type": "string",
+                    "description": "Time to check, e.g. '20:00', '8pm', '14:30', 'evening'"
+                },
+                "duration_minutes": {
+                    "type": "integer",
+                    "description": "Duration in minutes to check. Default 60.",
+                    "default": 60
+                },
+                "day": {
+                    "type": "string",
+                    "description": "Which day: 'today', 'tomorrow', 'monday', etc. Default: today.",
+                    "default": "today"
+                }
+            },
+            "required": ["time"]
+        }
+    },
+    {
+        "name": "get_free_slots",
+        "description": (
+            "Get a list of free time slots on a given day. "
+            "Use when the user asks 'when am I free', or when you need to suggest alternatives."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "day": {
+                    "type": "string",
+                    "description": "Which day. Default: today.",
+                    "default": "today"
+                },
+                "duration_minutes": {
+                    "type": "integer",
+                    "description": "Minimum slot length to look for. Default: 60.",
+                    "default": 60
+                }
+            }
+        }
+    },
+    {
+        "name": "schedule_meeting",
+        "description": (
+            "Schedule a meeting or commitment. Runs through the priority engine — "
+            "if the slot is taken, checks whether the requester outranks the conflict "
+            "(e.g. manager Bijoy can override gym). "
+            "Returns decision: 'confirm', 'reschedule_and_confirm', or 'decline' with alternatives."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Name of the meeting."},
+                "time": {"type": "string", "description": "Start time, e.g. '20:00', '8pm'."},
+                "duration_minutes": {"type": "integer", "description": "Duration. Default: 60.", "default": 60},
+                "requester_id": {
+                    "type": "string",
+                    "description": "Who is requesting — Slack ID, email, or name like 'bijoy'. Determines override priority. Default: 'unknown'.",
+                    "default": "unknown"
+                },
+                "day": {
+                    "type": "string",
+                    "description": "Which day. Default: today.",
+                    "default": "today"
+                }
+            },
+            "required": ["title", "time"]
+        }
+    },
+    {
+        "name": "reschedule_commitment",
+        "description": "Move an existing commitment to a new time.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "commitment_title": {
+                    "type": "string",
+                    "description": "Title of the commitment to move, e.g. 'Gym', 'CSE Class'."
+                },
+                "new_time": {
+                    "type": "string",
+                    "description": "New start time, e.g. '21:00', '9pm'."
+                }
+            },
+            "required": ["commitment_title", "new_time"]
+        }
+    },
+    {
+        "name": "cancel_commitment",
+        "description": "Remove a commitment from the routine.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "commitment_title": {
+                    "type": "string",
+                    "description": "Title of the commitment to remove."
+                }
+            },
+            "required": ["commitment_title"]
+        }
+    },
+    {
+        "name": "add_recurring_commitment",
+        "description": "Add a new recurring commitment to the routine (e.g. 'Add gym every weekday at 8pm').",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Name of the commitment."},
+                "time": {"type": "string", "description": "Start time, e.g. '20:00', '8pm'."},
+                "days": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Days of week: ['monday', 'tuesday', ...] or ['weekdays'] or ['everyday']."
+                },
+                "commitment_type": {
+                    "type": "string",
+                    "description": "Type matching config.yaml: gym, class, deep_work, work_meeting, lunch. Default: work_meeting.",
+                    "default": "work_meeting"
+                },
+                "duration_minutes": {"type": "integer", "description": "Duration. Default: 60.", "default": 60}
+            },
+            "required": ["title", "time", "days"]
+        }
+    },
+    {
+        "name": "send_slack_message",
+        "description": "Send a message to a Slack channel or DM.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "channel": {
+                    "type": "string",
+                    "description": "Channel name or ID, e.g. 'meeting-times', '#general'."
+                },
+                "message": {
+                    "type": "string",
+                    "description": "Message text to send."
+                }
+            },
+            "required": ["channel", "message"]
+        }
+    },
+    {
+        "name": "send_email",
+        "description": (
+            "Draft and send an email. Uses Claude to write a polished draft. "
+            "If Gmail isn't connected, returns the draft for the user to copy."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "to_email": {"type": "string", "description": "Recipient email address."},
+                "subject": {"type": "string", "description": "Email subject line."},
+                "context": {
+                    "type": "string",
+                    "description": "What the email should convey — the assistant will write the actual text."
+                }
+            },
+            "required": ["to_email", "context"]
+        }
+    }
+]
 
 
 class RoutineChatbot:
-    """Interactive routine assistant with service selection and meeting rescheduling."""
+    """
+    Routine Agent — Claude as orchestrator with tool-use.
 
-    def __init__(self, config_path: str = "config.yaml", routine_path: str = "routine.json", service_config: ServiceConfig | None = None, knowledge_base_path: str = "knowledge_store.json"):
+    respond(user_input) → natural language reply
+
+    Claude reads the message, decides which tools to call, calls them,
+    and formulates the final reply. No if/else routing in Python.
+    """
+
+    MAX_HISTORY = 24  # keep last N messages (prevents context overflow on long sessions)
+
+    def __init__(
+        self,
+        config_path: str = "config.yaml",
+        routine_path: str = "routine.json",
+        service_config: ServiceConfig | None = None,
+        knowledge_base_path: str = "knowledge_store.json",  # kept for API compat
+    ):
         project_root = Path(__file__).resolve().parent
-        self.config = Config(str(project_root / config_path) if not Path(config_path).is_absolute() and not Path(config_path).exists() else config_path)
-        self.routine_path = str(project_root / routine_path) if not Path(routine_path).is_absolute() and not Path(routine_path).exists() else routine_path
-        self.knowledge_base = UserKnowledgeBase(str(project_root / knowledge_base_path) if not Path(knowledge_base_path).is_absolute() and not Path(knowledge_base_path).exists() else knowledge_base_path)
+
+        def abs_path(p: str) -> str:
+            pp = Path(p)
+            return str(pp) if pp.is_absolute() or pp.exists() else str(project_root / p)
+
+        self.config = Config(abs_path(config_path))
+        self.routine_path = abs_path(routine_path)
         self.service_config = service_config or ServiceConfig.from_env()
+
+        # External service clients (only init if enabled & configured)
         self.slack = SlackIntegration() if self.service_config.slack_enabled else None
-        self.google = GoogleIntegration() if self.service_config.gmail_enabled or self.service_config.calendar_enabled else None
-        self.pending_change = None
-        self.pending_email = None
-        self.pending_send_target = None
-        self.intent_agent = IntentAgent()
-        self.email_agent = ClaudeAgent()
-        self.mcp_client = MCPToolClient()
-
-    def _mcp_routine_summary(self):
-        if hasattr(self, "mcp_client") and self.mcp_client is not None:
-            result = self.mcp_client.get_routine_summary()
-            if result is not None:
-                if hasattr(result, "content"):
-                    pieces = []
-                    for item in result.content:
-                        if getattr(item, "type", "") == "text":
-                            pieces.append(item.text)
-                    if pieces:
-                        return "\n".join(pieces)
-                if isinstance(result, str):
-                    return result
-        return None
-
-    def _mcp_free_slots(self):
-        if hasattr(self, "mcp_client") and self.mcp_client is not None:
-            result = self.mcp_client.get_free_slots_for_today()
-            if result is not None:
-                if hasattr(result, "content"):
-                    items = []
-                    for item in result.content:
-                        if getattr(item, "type", "") == "text":
-                            items.append(item.text)
-                    if items:
-                        return items
-                if isinstance(result, list):
-                    return result
-        return None
-
-    def _remember_user_context(self, user_input: str) -> None:
-        """Store important preferences and reminders in the knowledge base."""
-        if not user_input or not self.knowledge_base:
-            return
-        self.knowledge_base.remember_from_text(user_input)
-
-    def _build_llm_context(self, user_input: str) -> str:
-        """Create a single agent-style prompt so Gemini reasons across general chat, memory, and scheduling context."""
-        routine = load_routine(self.routine_path)
-        today_name = date.today().strftime("%A")
-        summarized = []
-        for item in routine[:8]:
-            day_names = ", ".join(day.value for day in item.days) if getattr(item, "days", None) else "custom"
-            summarized.append(f"- {item.title}: {day_names}, {item.time_slot.pretty()}")
-
-        timeline = "\n".join(summarized) if summarized else "- No scheduled items yet."
-        memory_lines = self.knowledge_base.get_memory_by_category() if self.knowledge_base else {}
-        categorized_memory = []
-        for category, items in memory_lines.items():
-            if not items:
-                continue
-            listed = ", ".join(item["fact"] for item in items[:5])
-            categorized_memory.append(f"{category.title()}: {listed}")
-        memory_block = "\n".join(f"- {entry}" for entry in categorized_memory) if categorized_memory else "- No remembered preferences yet."
-        profile_summary = self.knowledge_base.build_profile_summary() if self.knowledge_base else "No remembered user facts yet."
-        return (
-            "You are a helpful personal productivity assistant. "
-            "Answer naturally, use the user's request as the top priority, and blend general conversation with schedule planning. "
-            f"Today is {today_name}. The user's current routine is:\n{timeline}\n\n"
-            f"User profile summary:\n{profile_summary}\n\n"
-            f"Remembered user facts by category:\n{memory_block}\n\n"
-            "You may help with: general conversation, routine questions, meeting planning, email drafting, and task scheduling. "
-            "If the user asks to schedule or modify a meeting, keep the response brief, clear, and actionable. "
-            "Do not mention internal system details.\n\nUser request: "
-            f"{user_input}"
+        self.google = (
+            GoogleIntegration()
+            if (self.service_config.gmail_enabled or self.service_config.calendar_enabled)
+            else None
         )
 
-    def _resolve_gemini_model(self) -> str:
-        """Pick a supported Gemini model name from the current API surface."""
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            return ""
+        # Conversation history for multi-turn context
+        self.history: list[dict] = []
 
-        candidates = [
-            "gemini-3.6-flash",
-            "gemini-3.5-flash",
-            "gemini-2.5-flash",
-            "gemini-2.0-flash",
-            "gemini-1.5-flash",
-        ]
+    # ─── System prompt ────────────────────────────────────────────────────────
 
-        for model in candidates:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-            try:
-                probe = requests.post(
-                    url,
-                    json={"contents": [{"parts": [{"text": "Return exactly: MODEL_OK"}]}]},
-                    timeout=20,
-                )
-                if probe.status_code == 200:
-                    return model
-            except Exception:
-                continue
-        return candidates[0]
-
-    def _llm_chat_response(self, user_input: str) -> str:
-        """Use Gemini for real reasoning across both general chat and scheduling tasks."""
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            return ""
-
-        model_name = self._resolve_gemini_model()
-        if not model_name:
-            return ""
-
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-        prompt = self._build_llm_context(user_input)
-        payload = {"contents": [{"parts": [{"text": prompt}]}]}
-        try:
-            response = requests.post(url, json=payload, timeout=30)
-            if response.status_code != 200:
-                return ""
-            data = response.json()
-            candidates = data.get("candidates") or []
-            for cand in candidates:
-                parts = cand.get("content", {}).get("parts", [])
-                for part in parts:
-                    if isinstance(part, dict) and "text" in part:
-                        return part["text"]
-            return ""
-        except Exception:
-            return ""
-
-    def startup_check(self) -> str:
-        lines = [
-            f"Service mode: {', '.join(self.service_config.enabled_services) if self.service_config.enabled_services else 'none'}",
-        ]
-        if self.service_config.slack_enabled:
-            if self.slack and self.slack.bot_token:
-                lines.append("Slack: authenticated and ready.")
-            else:
-                lines.append("Slack: not configured. Add SLACK_BOT_TOKEN in .env to enable it.")
-        if self.service_config.gmail_enabled or self.service_config.calendar_enabled:
-            if self.google and self.google.creds is not None:
-                lines.append("Gmail/Calendar: authenticated and ready.")
-            else:
-                lines.append("Gmail/Calendar: OAuth token missing. Add token.json or run the Google login flow.")
-        routine = load_routine(self.routine_path)
-        if routine:
-            lines.append(f"Loaded routine: {len(routine)} commitment(s).")
-        else:
-            lines.append("No routine is loaded yet. Your schedule is empty for today.")
-        return "\n".join(lines)
-
-    def _today_commitments(self):
+    def _build_system_prompt(self) -> str:
+        today = date.today().strftime("%A, %B %d, %Y")
         commitments = load_routine(self.routine_path)
-        today_name = date.today().strftime("%A").lower()
-        day_enum = DayOfWeek(today_name)
-        return [c for c in commitments if day_enum in c.days]
 
-    def _extract_json_from_model_text(self, text: str):
-        if not text:
-            return None
-        cleaned = text.strip()
-        if cleaned.startswith("```"):
-            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
-            cleaned = re.sub(r"\s*```$", "", cleaned)
-        match = re.search(r"\{.*\}", cleaned, re.S)
-        if not match:
-            return None
-        try:
-            return json.loads(match.group(0))
-        except Exception:
-            return None
+        schedule_lines = []
+        for c in commitments[:12]:
+            days = ", ".join(d.value for d in c.days)
+            lock = " [fixed]" if not c.reschedulable else ""
+            schedule_lines.append(f"  - {c.title}: {days}, {c.time_slot.pretty()}{lock} (priority {c.priority})")
+        schedule_str = "\n".join(schedule_lines) if schedule_lines else "  (no commitments yet)"
 
-    def _llm_classify_user_action(self, text: str) -> dict:
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            return {"action": "general_chat"}
+        slack_status = "connected" if (self.slack and self.slack.bot_token) else "not configured"
+        gmail_status = "connected" if (self.google and self.google.creds) else "not configured"
 
-        prompt = (
-            "Classify the user's intent. Return only valid JSON with the shape {\"action\": \"send_email\"|\"send_slack_message\"|\"schedule_meeting\"|\"general_chat\"|\"check_routine\"}. "
-            "Use 'send_slack_message' when the user wants to send a direct message or post a message in Slack, even if the text contains a time like '8am'. "
-            "Use 'schedule_meeting' only when the user is actually asking to arrange, book, or confirm a meeting or call. "
-            "Examples: 'send a dm to slack meeting at 8 am' => send_slack_message; 'can we meet at 8am?' => schedule_meeting; 'send email to jane@example.com' => send_email; 'show my routine' => check_routine. "
-            f"Message: {text}"
+        return (
+            f"You are a personal scheduling and productivity assistant. Today is {today}.\n\n"
+            f"Current routine:\n{schedule_str}\n\n"
+            f"Connected services: Slack ({slack_status}), Gmail ({gmail_status}).\n\n"
+            "Guidelines:\n"
+            "- Be conversational and concise. Never mention tool names or internal steps.\n"
+            "- Use tools to get real data — don't guess from memory.\n"
+            "- Always call check_time_slot or read_schedule before scheduling.\n"
+            "- If a time conflicts, explain it and offer alternatives via get_free_slots.\n"
+            "- For emails: show the draft and confirm before sending, unless told to send directly.\n"
+            "- Priority system: high-priority requesters (like manager Bijoy) can override low-priority\n"
+            "  commitments (like gym). The schedule_meeting tool handles this automatically.\n"
         )
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self._resolve_gemini_model() or 'gemini-2.0-flash'}:generateContent?key={api_key}"
-        try:
-            response = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=30)
-            if response.status_code != 200:
-                return {"action": "general_chat"}
-            payload = response.json()
-            for candidate in payload.get("candidates", []):
-                for part in candidate.get("content", {}).get("parts", []):
-                    parsed = self._extract_json_from_model_text(part.get("text", ""))
-                    if isinstance(parsed, dict) and "action" in parsed:
-                        action = str(parsed["action"]).strip().lower()
-                        if action in {"send_email", "send_slack_message", "schedule_meeting", "general_chat", "check_routine"}:
-                            return {"action": action}
-        except Exception:
-            return {"action": "general_chat"}
-        return {"action": "general_chat"}
 
-    def _llm_classify_meeting_request(self, text: str) -> bool:
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            return False
+    # ─── Time / day parsing helpers ───────────────────────────────────────────
 
-        prompt = (
-            "Decide whether this message is a meeting or scheduling request. "
-            "Return only valid JSON: {\"is_meeting_request\": true|false}. "
-            "Examples of true: 'can we meet', 'schedule a call', 'book a meeting', 'I am free tomorrow at 3pm'. "
-            "Examples of false: 'how are you', 'what's up', 'tell me about my routine'. "
-            f"Message: {text}"
-        )
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self._resolve_gemini_model() or 'gemini-2.0-flash'}:generateContent?key={api_key}"
-        try:
-            response = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=30)
-            if response.status_code != 200:
-                return False
-            payload = response.json()
-            for candidate in payload.get("candidates", []):
-                for part in candidate.get("content", {}).get("parts", []):
-                    value = part.get("text", "")
-                    parsed = self._extract_json_from_model_text(value)
-                    if not isinstance(parsed, dict):
-                        continue
-                    if "is_meeting_request" in parsed:
-                        return bool(parsed.get("is_meeting_request"))
-                    if "meeting_request" in parsed:
-                        return bool(parsed.get("meeting_request"))
-        except Exception:
-            return False
-        return False
+    def _parse_time_str(self, time_str: str):
+        """Parse natural time strings → datetime.time. Returns None if unparseable."""
+        s = (time_str or "").strip().lower()
 
-    def _looks_like_meeting_request(self, text: str) -> bool:
-        lower = (text or "").lower()
-        meeting_words = [
-            "meeting",
-            "meet",
-            "schedule",
-            "arrange",
-            "sync",
-            "call",
-            "chat",
-            "coffee",
-            "availability",
-            "free for",
-            "free at",
-            "can we meet",
-            "let's meet",
-        ]
-        if any(word in lower for word in meeting_words):
-            return True
-        if re.search(r"\b(?:meet|meeting|schedule|arrange|sync|call)\b", lower):
-            return True
-        return self._llm_classify_meeting_request(text)
+        word_map = {
+            "morning": "09:00", "noon": "12:00", "afternoon": "14:00",
+            "evening": "18:00", "night": "20:00", "tonight": "20:00", "midnight": "00:00"
+        }
+        for word, t in word_map.items():
+            if word in s:
+                return datetime.strptime(t, "%H:%M").time()
 
-    def _extract_relative_date(self, text: str):
-        lower = text.lower()
+        # "20:00" or "8:30"
+        m = re.match(r"^(\d{1,2}):(\d{2})$", s)
+        if m:
+            try:
+                return datetime.strptime(f"{m.group(1)}:{m.group(2)}", "%H:%M").time()
+            except ValueError:
+                pass
+
+        # "8pm", "8:30pm", "8 pm"
+        m = re.match(r"^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$", s)
+        if m:
+            h, mins = int(m.group(1)), int(m.group(2) or 0)
+            if m.group(3) == "pm" and h != 12:
+                h += 12
+            if m.group(3) == "am" and h == 12:
+                h = 0
+            try:
+                return datetime.strptime(f"{h:02d}:{mins:02d}", "%H:%M").time()
+            except ValueError:
+                pass
+
+        # Plain number: assume PM for 1–6, AM for 7–11 (common convention)
+        m = re.match(r"^(\d{1,2})$", s)
+        if m:
+            h = int(m.group(1))
+            if 1 <= h <= 6:
+                h += 12  # 1–6 → 13:00–18:00
+            try:
+                return datetime.strptime(f"{h:02d}:00", "%H:%M").time()
+            except ValueError:
+                pass
+
+        return None
+
+    def _parse_day_str(self, day_str: str) -> date:
+        """Parse 'today', 'tomorrow', 'monday', etc. → date object."""
+        s = (day_str or "today").strip().lower()
         today = date.today()
-        if "tomorrow" in lower:
-            return today.replace(day=today.day + 1) if today.day < 28 else today
-        if "today" in lower or "tonight" in lower or "this evening" in lower:
+        if s in ("today", ""):
             return today
+        if s == "tomorrow":
+            return today + timedelta(days=1)
+        day_names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+        if s in day_names:
+            target = day_names.index(s)
+            current = today.weekday()
+            delta = (target - current) % 7 or 7  # always forward
+            return today + timedelta(days=delta)
         return today
 
-    def _llm_extract_meeting_time(self, text: str):
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            return None
+    def _expand_day_shortcuts(self, days: list) -> list:
+        """Expand 'weekdays', 'everyday', 'weekend' shortcuts."""
+        result = []
+        for d in days:
+            s = d.lower()
+            if s in ("weekdays", "weekday", "every weekday"):
+                result += ["monday", "tuesday", "wednesday", "thursday", "friday"]
+            elif s in ("everyday", "every day", "daily"):
+                result += ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+            elif s in ("weekend", "weekends"):
+                result += ["saturday", "sunday"]
+            else:
+                result.append(s)
+        return result
 
-        prompt = (
-            "Extract the meeting time and date from this message. "
-            "Return only a JSON object like {\"date\": \"YYYY-MM-DD\", \"time\": \"HH:MM\"}. "
-            "Interpret natural language like 'at 8 at night today', 'tomorrow at 9am', 'this evening', 'morning', 'afternoon', 'night'. "
-            f"Message: {text}"
+    # ─── Tool implementations ─────────────────────────────────────────────────
+
+    def _tool_read_schedule(self, inp: dict) -> str:
+        day_str = inp.get("day", "today")
+        target = self._parse_day_str(day_str)
+        day_enum = DayOfWeek(target.strftime("%A").lower())
+        commitments = load_routine(self.routine_path)
+        day_comms = sorted(
+            [c for c in commitments if day_enum in c.days],
+            key=lambda c: c.time_slot.start,
         )
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
-        try:
-            response = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=30)
-            if response.status_code != 200:
-                return None
-            payload = response.json()
-            for candidate in payload.get("candidates", []):
-                for part in candidate.get("content", {}).get("parts", []):
-                    text_value = part.get("text", "")
-                    if not text_value:
-                        continue
-                    match = re.search(r"\{.*\}", text_value, re.S)
-                    if match:
-                        import json as json_mod
-                        return json_mod.loads(match.group(0))
-        except Exception:
-            return None
-        return None
+        label = target.strftime("%A, %B %d")
+        if not day_comms:
+            return f"No commitments on {label} — completely free."
+        lines = [f"Schedule for {label}:"]
+        for c in day_comms:
+            lock = " [cannot be moved]" if not c.reschedulable else ""
+            lines.append(f"  • {c.time_slot.pretty():<25} {c.title}{lock} (priority {c.priority})")
+        return "\n".join(lines)
 
-    def _parse_time_from_text(self, text: str):
-        lower = text.lower()
+    def _tool_check_time_slot(self, inp: dict) -> str:
+        time_str = inp.get("time", "")
+        duration = int(inp.get("duration_minutes", 60))
+        day_str = inp.get("day", "today")
 
-        time_hint = None
-        if any(word in lower for word in ["at night", "night", "tonight", "this evening", "evening"]):
-            time_hint = datetime.strptime("20:00", "%H:%M").time()
-        elif any(word in lower for word in ["morning", "in the morning", "tomorrow morning"]):
-            time_hint = datetime.strptime("09:00", "%H:%M").time()
-        elif "afternoon" in lower:
-            time_hint = datetime.strptime("15:00", "%H:%M").time()
-        elif "noon" in lower:
-            time_hint = datetime.strptime("12:00", "%H:%M").time()
+        start = self._parse_time_str(time_str)
+        if start is None:
+            return f"Couldn't parse time '{time_str}'. Use format like '8pm' or '20:00'."
 
-        if time_hint is not None:
-            end = datetime.strptime(f"{time_hint.hour + 1:02d}:{time_hint.minute:02d}", "%H:%M").time()
-            return TimeSlot(start=time_hint, end=end)
-
-        explicit_match = re.search(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", text, re.IGNORECASE)
-        if explicit_match:
-            hour = int(explicit_match.group(1))
-            minute = int(explicit_match.group(2) or 0)
-            meridiem = (explicit_match.group(3) or "").lower()
-            if meridiem == "pm" and hour < 12:
-                hour += 12
-            if meridiem == "am" and hour == 12:
-                hour = 0
-            if 0 <= hour <= 23 and 0 <= minute <= 59:
-                start = datetime.strptime(f"{hour:02d}:{minute:02d}", "%H:%M").time()
-                end_minute = minute + 60
-                end_hour = hour
-                if end_minute >= 60:
-                    end_hour += 1
-                    end_minute -= 60
-                end = datetime.strptime(f"{end_hour:02d}:{end_minute:02d}", "%H:%M").time()
-                return TimeSlot(start=start, end=end)
-
-        llm_data = self._llm_extract_meeting_time(text)
-        if llm_data and llm_data.get("time"):
-            try:
-                parsed_time = datetime.strptime(llm_data["time"], "%H:%M").time()
-                end = datetime.strptime(f"{parsed_time.hour + 1:02d}:{parsed_time.minute:02d}", "%H:%M").time()
-                return TimeSlot(start=parsed_time, end=end)
-            except ValueError:
-                return None
-
-        return None
-
-    def _match_commitment_by_time(self, text: str):
-        target_time = self._parse_time_from_text(text)
-        if target_time is None:
-            return None
-        for commitment in self._today_commitments():
-            if commitment.time_slot.start.hour == target_time.start.hour and commitment.time_slot.start.minute == target_time.start.minute:
-                return commitment
-        return None
-
-    def _extract_send_target(self, text: str) -> str | None:
-        lower = (text or "").lower()
-
-        if re.search(r"\bcancel\s+mail\s+and\s+send\s+(?:a\s+)?dm\b", lower):
-            return "dm"
-
-        send_match = re.search(r"\bsend\b(?:\s+\w+){0,6}\s+(mail|dm)\b", lower)
-        if send_match:
-            return send_match.group(1)
-        return None
-
-    def _is_exact_mail_to_dm_override(self, text: str) -> bool:
-        return bool(re.search(r"\bcancel\s+mail\s+and\s+send\s+(?:a\s+)?dm\b", (text or "").lower()))
-
-    def _is_explicit_send_action(self, text: str) -> bool:
-        lower = (text or "").lower()
-        if "send" not in lower:
-            return False
-        if any(phrase in lower for phrase in [
-            "schedule a meeting",
-            "arrange a meeting",
-            "can we meet",
-            "book a meeting",
-            "let's meet",
-            "meeting request",
-        ]):
-            return False
-        return any(token in lower for token in ["mail", "email", "dm", "slack", "message", "send to slack", "send a dm", "send a mail", "send email"])
-
-    def _handle_reschedule(self, text: str) -> str:
-        lower = text.lower()
-
-        if self.pending_change and any(word in lower for word in ["confirm", "yes", "approve", "ok"]):
-            original = self.pending_change["original"]
-            new_time = self.pending_change["new_time"]
-            commitments = load_routine(self.routine_path)
-            updated = []
-            for c in commitments:
-                if c.id == original.id:
-                    c.time_slot.start = new_time
-                    end_hour = new_time.hour + 1
-                    end_minute = new_time.minute
-                    if end_minute >= 60:
-                        end_hour += 1
-                        end_minute -= 60
-                    c.time_slot.end = datetime.strptime(f"{end_hour:02d}:{end_minute:02d}", "%H:%M").time()
-                    c.notes = f"Rescheduled by assistant. Original time: {self.pending_change['old_time']}"
-                updated.append(c)
-            save_routine(updated, self.routine_path)
-            self.pending_change = None
-            return f"Confirmed. I updated your routine and moved {original.title} to {new_time.strftime('%I:%M %p')}."
-
-        if self.pending_change and any(word in lower for word in ["cancel", "no", "reject"]):
-            self.pending_change = None
-            return "Reschedule request cancelled. Your routine remains unchanged."
-
-        if any(word in lower for word in ["cancel", "move", "reschedule", "postpone"]):
-            target = self._match_commitment_by_time(text)
-            if target is None:
-                return "I couldn't find a meeting at that time in your routine. Please specify an exact time like '9 pm' or '10:30 pm'."
-
-            new_match = re.search(r"(?:to|at|for)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", text, re.IGNORECASE)
-            if not new_match:
-                return (
-                    f"I found {target.title} at {target.time_slot.pretty()}. "
-                    f"If you want to move it, tell me the new time, for example: 'move {target.title} to 10 pm'."
-                )
-
-            new_hour = int(new_match.group(1))
-            new_minute = int(new_match.group(2) or 0)
-            meridiem = (new_match.group(3) or "").lower()
-            if meridiem == "pm" and new_hour < 12:
-                new_hour += 12
-            if meridiem == "am" and new_hour == 12:
-                new_hour = 0
-            new_time = datetime.strptime(f"{new_hour:02d}:{new_minute:02d}", "%H:%M").time()
-            self.pending_change = {
-                "original": target,
-                "new_time": new_time,
-                "old_time": target.time_slot.pretty(),
-            }
-            return (
-                f"I’ve requested the change for {target.title}. "
-                f"I can move it from {target.time_slot.pretty()} to {new_time.strftime('%I:%M %p')}. "
-                f"Reply 'confirm' or 'cancel'."
-            )
-
-        return ""
-
-    def _send_pending_email(self) -> str:
-        pending = self.pending_email
-        self.pending_email = None
-        self.pending_send_target = None
-        if not pending:
-            return "There is no pending email draft."
-        if self.google is None or self.google.creds is None:
-            return (
-                f"I have the draft ready for {pending['to_email']}, but Gmail isn't connected yet, so nothing was sent. "
-                "Please authenticate Google before sending email."
-            )
-        try:
-            self.google.send_email(pending["to_email"], pending["subject"], pending["body"])
-            return f"Email sent to {pending['to_email']} with subject \"{pending['subject']}\"."
-        except Exception as exc:
-            return f"I tried to send the email to {pending['to_email']}, but it failed: {exc}"
-
-    def _handle_email(self, text: str) -> str:
-        lower = text.lower()
-        if self.pending_email:
-            if any(word in lower for word in ["confirm", "yes", "approve", "ok"]):
-                return self._send_pending_email()
-            if any(word in lower for word in ["cancel", "no", "reject"]):
-                self.pending_email = None
-                return "Okay, I won’t send that email."
-            if "send it" in lower or "send" in lower:
-                pending = self.pending_email
-                return (
-                    f"Draft ready for {pending['to_email']}:\n\n"
-                    f"Subject: {pending['subject']}\n\n{pending['body']}\n\n"
-                    "Reply 'confirm' to send it, or 'cancel' to stop."
-                )
-            pending = self.pending_email
-            return (
-                f"Draft ready for {pending['to_email']}:\n\n"
-                f"Subject: {pending['subject']}\n\n{pending['body']}\n\n"
-                "Reply 'confirm' to send it, or 'cancel' to stop."
-            )
-
-        email_match = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text)
-        intent = self.intent_agent.parse(text)
-        if intent.get("intent") != "email" and not email_match:
-            return ""
-
-        email = intent.get("to_email") or (email_match.group(0) if email_match else None)
-        if not email or not validate_email_address(email):
-            return "I need a valid email address before I can draft or send an email."
-
-        cleaned = text.strip()
-        if email_match:
-            cleaned = cleaned.replace(email_match.group(0), "").strip()
-        cleaned = re.sub(r"^(send|draft|write)\s+email\s+to\b", "", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r"^(send|draft|write)\b", "", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r"^(email|mail)\s+to\b", "", cleaned, flags=re.IGNORECASE)
-        cleaned = cleaned.strip(" -:;,. ")
-        if not cleaned:
-            cleaned = "Please review the attached details and let me know your availability."
-
-        subject_hint = "Meeting request"
-        lowered = cleaned.lower()
-        if "budget" in lowered:
-            subject_hint = "Quarterly budget review"
-        elif "availability" in lowered or "free" in lowered:
-            subject_hint = "Availability and next steps"
-        elif "follow up" in lowered or "review" in lowered:
-            subject_hint = "Follow-up and review"
-        elif "thank" in lowered:
-            subject_hint = "Thank you"
-        elif "schedule" in lowered or "meeting" in lowered:
-            subject_hint = "Meeting request"
-
-        draft = self.email_agent.draft_email(email, subject_hint, cleaned)
-        self.pending_email = {"to_email": email, "subject": subject_hint, "body": draft}
-        self.pending_send_target = "mail"
-        return (
-            f"Draft ready for {email}:\n\n"
-            f"Subject: {subject_hint}\n\n{draft}\n\n"
-            "Reply 'confirm' to send it, or 'cancel' to stop."
-        )
-
-    def _handle_recurring_commitment(self, text: str) -> str | None:
-        from message_parser import parse_recurring_commitment_text
-
-        parsed = parse_recurring_commitment_text(text)
-        if not parsed:
-            return None
+        end_dt = datetime.combine(date.today(), start) + timedelta(minutes=duration)
+        slot = TimeSlot(start=start, end=end_dt.time())
+        target = self._parse_day_str(day_str)
 
         commitments = load_routine(self.routine_path)
-        existing = [c for c in commitments if c.title.lower() == parsed["title"].lower()]
-        if existing:
-            for item in existing:
-                item.days = parsed["days"]
-                item.time_slot.start = datetime.strptime(parsed["start_time"], "%H:%M").time()
-                item.time_slot.end = datetime.strptime(parsed["end_time"], "%H:%M").time()
-                item.notes = f"Updated from recurring instruction: {text}"
-            save_routine(commitments, self.routine_path)
-            return f"Updated your {parsed['title']} schedule to {parsed['start_time']} every day except Friday."
+        is_free, conflict = is_slot_free(target, slot, commitments)
 
-        from models import Commitment, TimeSlot
-        commitment = Commitment(
-            id=f"{parsed['title'].lower()}-{len(commitments) + 1}",
-            title=parsed["title"],
-            commitment_type=parsed["title"].lower().replace(" ", "_"),
-            days=parsed["days"],
-            time_slot=TimeSlot(
-                start=datetime.strptime(parsed["start_time"], "%H:%M").time(),
-                end=datetime.strptime(parsed["end_time"], "%H:%M").time(),
-            ),
-            priority=2,
-            reschedulable=True,
-            notes=f"Added from recurring instruction: {text}",
+        if is_free:
+            return f"✅ {slot.pretty()} on {target.strftime('%A')} is free."
+        return (
+            f"❌ Conflict: '{conflict.title}' at {conflict.time_slot.pretty()} on {target.strftime('%A')}. "
+            f"Priority: {conflict.priority}, moveable: {conflict.reschedulable}."
         )
-        commitments.append(commitment)
-        save_routine(commitments, self.routine_path)
-        return f"Added {parsed['title']} at {parsed['start_time']} for the recurring days you described."
 
-    def _is_explicit_slack_send_message(self, text: str) -> bool:
-        lower = (text or "").lower()
-        has_send_intent = any(keyword in lower for keyword in [
-            "send a dm", "send a message", "send dm", "dm to slack", "message to slack",
-            "post to slack", "send to slack", "message in slack", "to slack saying",
-            "to slack say", "post to #meeting-times", "send a message to #meeting-times",
-            "send a dm to slack", "send dm to slack", "send a message to slack", "send message to slack",
-        ])
-        has_channel_target = "slack" in lower or "meeting-times" in lower or "#meeting-times" in lower or "meeting times" in lower or "channel" in lower
-        has_message_body = "saying" in lower or "say " in lower or "message in slack" in lower or "to slack" in lower
-        return has_send_intent and has_channel_target and has_message_body
+    def _tool_get_free_slots(self, inp: dict) -> str:
+        day_str = inp.get("day", "today")
+        duration = int(inp.get("duration_minutes", 60))
+        target = self._parse_day_str(day_str)
+        commitments = load_routine(self.routine_path)
+        slots = get_free_slots(target, commitments, duration_minutes=duration)
+        if not slots:
+            return f"No free {duration}-minute gaps on {target.strftime('%A, %B %d')}."
+        pretty = [s.pretty() for s in slots[:6]]
+        return f"Free {duration}-min slots on {target.strftime('%A, %B %d')}: {', '.join(pretty)}."
 
-    def _handle_slack_send_message(self, text: str) -> str | None:
-        lower_text = text.lower()
-        if self.slack is None:
-            return None
+    def _tool_schedule_meeting(self, inp: dict) -> str:
+        title = inp.get("title", "Meeting")
+        time_str = inp.get("time", "")
+        duration = int(inp.get("duration_minutes", 60))
+        requester_id = inp.get("requester_id", "unknown")
+        day_str = inp.get("day", "today")
 
-        has_send_intent = any(keyword in lower_text for keyword in [
-            "send a dm", "send a message", "send dm", "dm to slack", "message to slack",
-            "post to slack", "send to slack", "message in slack", "to slack saying",
-            "to slack say", "post to #meeting-times", "send a message to #meeting-times",
-            "send a dm to slack", "send dm to slack", "send a message to slack", "send message to slack",
-        ])
-        has_channel_target = "meeting-times" in lower_text or "#meeting-times" in lower_text or "meeting times" in lower_text
-        if not (has_send_intent or has_channel_target):
-            return None
-        if any(phrase in lower_text for phrase in ["can we meet", "schedule a meeting", "arrange a meeting", "let's meet", "meeting request", "book a meeting"]):
-            if not self._is_explicit_slack_send_message(text):
-                return None
+        start = self._parse_time_str(time_str)
+        if start is None:
+            return f"Couldn't parse time '{time_str}'."
 
-        target = "meeting-times"
-        for candidate in ["meeting-times", "#meeting-times", "meeting times"]:
-            if candidate in lower_text:
-                target = candidate
-                break
+        end_dt = datetime.combine(date.today(), start) + timedelta(minutes=duration)
+        slot = TimeSlot(start=start, end=end_dt.time())
+        target = self._parse_day_str(day_str)
 
-        message = text
-        if "saying" in lower_text:
-            _, message = text.split("saying", 1)
-            message = message.strip().strip('"\'')
-        elif "say " in lower_text:
-            _, message = re.split(r"\bsay\b", text, flags=re.IGNORECASE, maxsplit=1)
-            message = message.strip().strip('"\'')
-        else:
-            message = re.sub(r"^(?:send|dm|message|post)\s+(?:a\s+)?(?:dm\s+)?(?:to\s+)?(?:slack\s+)?(?:in\s+)?(?:channel\s+)?(?:to\s+)?(?:#?meeting-times\s+)?", "", text, flags=re.IGNORECASE).strip()
-            message = re.sub(r"^(?:saying\s+|say\s+)", "", message, flags=re.IGNORECASE).strip()
+        request = MeetingRequest(
+            requester_id=requester_id,
+            requester_name=requester_id,
+            channel="chat",
+            message_text=title,
+            requested_date=target,
+            requested_time_slot=slot,
+            duration_minutes=duration,
+        )
+        decision = handle_meeting_request(request, target, self.config, self.routine_path)
 
-        if not message:
-            message = "Meeting at 8 am"
-        elif message and message[0].islower():
-            message = message[0].upper() + message[1:]
-
-        channel_id = getattr(self.slack, "resolve_channel_id", lambda _target: None)(target)
-        if not channel_id:
-            for candidate in self.service_config.slack_channel_ids or ["meeting-times"]:
-                channel_id = getattr(self.slack, "resolve_channel_id", lambda _target: None)(candidate)
-                if channel_id:
-                    break
-        if not channel_id:
-            return "I couldn't find the Slack meeting-times channel, so I couldn't send the message."
-
-        self.pending_send_target = "dm"
-        self.slack.send_message(channel_id, message)
-        self.pending_send_target = None
-        return f"Slack message sent to {target}."
-
-    def respond(self, user_input: str) -> str:
-        text = (user_input or "").strip()
-        lower_text = text.lower()
-
-        self._remember_user_context(text)
-
-        explicit_send_target = self._extract_send_target(text)
-        if self._is_exact_mail_to_dm_override(text):
-            self.pending_email = None
-            self.pending_send_target = "dm"
-        elif explicit_send_target == "mail":
-            self.pending_send_target = "mail"
-        elif explicit_send_target == "dm":
-            self.pending_send_target = "dm"
-
-        if self.pending_email and self.pending_send_target == "mail":
-            if not re.search(r"\bsend\b(?:\s+\w+){0,6}\s+(?:mail|dm)\b", lower_text):
-                email_response = self._handle_email(text)
-                if email_response and email_response.strip():
-                    return email_response
-
-        if self._is_explicit_send_action(text):
-            if any(token in lower_text for token in ["mail", "email"]):
-                email_response = self._handle_email(text)
-                if email_response and email_response.strip():
-                    return email_response
-            if any(token in lower_text for token in ["dm", "slack", "message", "channel"]):
-                slack_send_response = self._handle_slack_send_message(text)
-                if slack_send_response:
-                    return slack_send_response
-
-        llm_action = self._llm_classify_user_action(text)
-        if llm_action.get("action") == "send_slack_message":
-            slack_send_response = self._handle_slack_send_message(text)
-            if slack_send_response:
-                return slack_send_response
-
-        if llm_action.get("action") == "send_email":
-            email_response = self._handle_email(text)
-            if email_response and email_response.strip():
-                return email_response
-
-        if llm_action.get("action") == "schedule_meeting":
-            if self._looks_like_meeting_request(lower_text):
-                day = date.today()
-                requested_time = self._parse_time_from_text(lower_text)
-                if requested_time is None:
-                    return "I can help schedule that. Tell me the time and date more clearly, and I’ll confirm the slot."
-                request = MeetingRequest(
-                    requester_id="bijoy",
-                    requester_name="Bijoy",
-                    channel="slack",
-                    message_text=user_input,
-                    requested_date=day,
-                    requested_time_slot=requested_time,
-                    duration_minutes=60,
-                )
-                decision = handle_meeting_request(request, day, self.config, self.routine_path)
-                if decision.action in {"confirm", "reschedule_and_confirm"}:
-                    return f"{decision.reply_message} Reply 'confirm' in the channel to lock it in, or 'cancel' to stop."
-                return decision.reply_message
-
-        slack_send_response = self._handle_slack_send_message(text)
-        if slack_send_response:
-            return slack_send_response
-
-        recurring_response = self._handle_recurring_commitment(text)
-        if recurring_response:
-            return recurring_response
-
-        if self.pending_email and any(keyword in lower_text for keyword in ["confirm", "cancel", "yes", "no", "send it", "send", "approve", "reject"]):
-            email_response = self._handle_email(text)
-            if email_response:
-                return email_response
-
-        if self.pending_email and not any(keyword in lower_text for keyword in ["confirm", "cancel", "yes", "no", "send it", "send", "approve", "reject", "email", "draft"]):
-            self.pending_email = None
-
-        if not text:
-            return "I can help with your routine. Ask: 'When am I free today?', 'Can we meet at 8pm?', or 'Show my schedule.'"
-
-        if self._is_explicit_slack_send_message(text):
-            slack_send_response = self._handle_slack_send_message(text)
-            if slack_send_response:
-                return slack_send_response
-
-        if any(word in lower_text for word in ["#general", "slack", "channel"]) or self._looks_like_meeting_request(lower_text):
-            if self._looks_like_meeting_request(lower_text):
-                if self._is_explicit_slack_send_message(text):
-                    slack_send_response = self._handle_slack_send_message(text)
-                    if slack_send_response:
-                        return slack_send_response
-                day = date.today()
-                requested_time = self._parse_time_from_text(lower_text)
-                if requested_time is None:
-                    return "I can help schedule that. Tell me the time and date more clearly, and I’ll confirm the slot."
-                request = MeetingRequest(
-                    requester_id="bijoy",
-                    requester_name="Bijoy",
-                    channel="slack",
-                    message_text=user_input,
-                    requested_date=day,
-                    requested_time_slot=requested_time,
-                    duration_minutes=60,
-                )
-                decision = handle_meeting_request(request, day, self.config, self.routine_path)
-                if decision.action in {"confirm", "reschedule_and_confirm"}:
-                    return f"{decision.reply_message} Reply 'confirm' in the channel to lock it in, or 'cancel' to stop."
-                return decision.reply_message
-
-        email_response = self._handle_email(text)
-        if email_response and email_response.strip():
-            return email_response
-
-        provider_response = self._llm_chat_response(text)
-        if provider_response and provider_response.strip():
-            return provider_response.strip()
-
-        pending_response = self._handle_reschedule(text)
-        if pending_response:
-            return pending_response
-
-        mcp_summary = self._mcp_routine_summary()
-        if mcp_summary and ("when am i free" in lower_text or "free today" in lower_text):
-            free_slots = self._mcp_free_slots()
-            if free_slots:
-                return f"Your next free slots today are: {', '.join(free_slots)}."
-
-        if "when am i free" in lower_text or "free today" in lower_text:
-            today = date.today()
-            commitments = load_routine(self.routine_path)
-            slots = get_free_slots(today, commitments, duration_minutes=60)
-            if not slots:
-                return "You do not have any free 60-minute blocks today based on your current routine."
-            readable = ", ".join(slot.pretty() for slot in slots[:5])
-            return f"Your next free slots today are: {readable}."
-
-        if any(keyword in lower_text for keyword in ["show my schedule", "show my routine", "schedule", "routine", "what's my routine", "what is my routine"]):
-            commitments = self._today_commitments()
-            if not commitments:
-                return "You have no meetings scheduled for today. Your routine is empty right now."
-            summary = ", ".join(f"{c.title} at {c.time_slot.pretty()}" for c in commitments)
-            return f"Your routine for today: {summary}."
-
-        if self._looks_like_meeting_request(lower_text):
-            day = date.today()
-            requested_time = self._parse_time_from_text(lower_text)
-            if not requested_time:
-                return "I can help schedule that. Tell me the time and date more clearly, and I’ll confirm the slot."
-            request = MeetingRequest(
-                requester_id="bijoy",
-                requester_name="Bijoy",
-                channel="slack",
-                message_text=user_input,
-                requested_date=day,
-                requested_time_slot=requested_time,
-                duration_minutes=60,
+        # If approved, write it to routine
+        if decision.action in ("confirm", "reschedule_and_confirm"):
+            day_enum = DayOfWeek(target.strftime("%A").lower())
+            new_c = Commitment(
+                id=f"meeting-{title.lower().replace(' ', '-')}-{target}",
+                title=title,
+                commitment_type="work_meeting",
+                days=[day_enum],
+                time_slot=slot,
+                priority=7,
+                reschedulable=False,
+                notes=f"Scheduled via assistant on {date.today()}",
             )
-            decision = handle_meeting_request(request, day, self.config, self.routine_path)
-            return decision.reply_message
-
-        if any(word in lower_text for word in ["cancel", "move", "reschedule", "postpone"]):
-            return self._handle_reschedule(text)
+            existing = load_routine(self.routine_path)
+            existing.append(new_c)
+            save_routine(existing, self.routine_path)
 
         return (
-            "I can help with routine planning. Try asking: 'When am I free today?', "
-            "'Show my schedule', 'What's my routine today?', or 'Can we meet at 8pm?'"
+            f"Action: {decision.action}. "
+            f"{decision.reply_message} "
+            f"(Reasoning: {decision.reasoning})"
         )
+
+    def _tool_reschedule_commitment(self, inp: dict) -> str:
+        title = inp.get("commitment_title", "")
+        new_time_str = inp.get("new_time", "")
+
+        commitments = load_routine(self.routine_path)
+        match = next((c for c in commitments if c.title.lower() == title.lower()), None)
+        if match is None:
+            match = next((c for c in commitments if title.lower() in c.title.lower()), None)
+        if match is None:
+            names = ", ".join(c.title for c in commitments)
+            return f"No commitment named '{title}'. Existing: {names}."
+
+        new_start = self._parse_time_str(new_time_str)
+        if new_start is None:
+            return f"Couldn't parse new time '{new_time_str}'."
+
+        old_pretty = match.time_slot.pretty()
+        old_dur = match.time_slot.duration_minutes()
+        end_dt = datetime.combine(date.today(), new_start) + timedelta(minutes=old_dur)
+        match.time_slot = TimeSlot(start=new_start, end=end_dt.time())
+        match.notes = f"Rescheduled from {old_pretty} via assistant."
+        save_routine(commitments, self.routine_path)
+        return f"Moved '{match.title}' from {old_pretty} to {match.time_slot.pretty()}."
+
+    def _tool_cancel_commitment(self, inp: dict) -> str:
+        title = inp.get("commitment_title", "")
+        commitments = load_routine(self.routine_path)
+        updated = [c for c in commitments if c.title.lower() != title.lower()]
+        if len(updated) == len(commitments):
+            updated = [c for c in commitments if title.lower() not in c.title.lower()]
+        if len(updated) == len(commitments):
+            names = ", ".join(c.title for c in commitments)
+            return f"No commitment named '{title}'. Existing: {names}."
+        removed = len(commitments) - len(updated)
+        save_routine(updated, self.routine_path)
+        return f"Removed {removed} commitment(s) matching '{title}'."
+
+    def _tool_add_recurring_commitment(self, inp: dict) -> str:
+        title = inp.get("title", "New Commitment")
+        time_str = inp.get("time", "09:00")
+        days_raw = self._expand_day_shortcuts(inp.get("days", ["monday"]))
+        commitment_type = inp.get("commitment_type", "work_meeting")
+        duration = int(inp.get("duration_minutes", 60))
+
+        start = self._parse_time_str(time_str)
+        if start is None:
+            return f"Couldn't parse time '{time_str}'."
+
+        day_enums = []
+        for d in days_raw:
+            try:
+                day_enums.append(DayOfWeek(d.lower()))
+            except ValueError:
+                pass
+        if not day_enums:
+            return f"No valid days in {days_raw}. Use: monday, tuesday, ..., everyday, weekdays."
+
+        end_dt = datetime.combine(date.today(), start) + timedelta(minutes=duration)
+        cfg = self.config.get_commitment_config(commitment_type)
+        new_c = Commitment(
+            id=f"{title.lower().replace(' ', '-')}-recurring",
+            title=title,
+            commitment_type=commitment_type,
+            days=day_enums,
+            time_slot=TimeSlot(start=start, end=end_dt.time()),
+            priority=cfg.get("priority", 5),
+            reschedulable=cfg.get("reschedulable", True),
+            notes=f"Added via assistant on {date.today()}",
+        )
+        existing = load_routine(self.routine_path)
+        # Replace if same title exists, otherwise append
+        existing = [c for c in existing if c.title.lower() != title.lower()]
+        existing.append(new_c)
+        save_routine(existing, self.routine_path)
+        days_str = ", ".join(d.value for d in day_enums)
+        return f"Added '{title}' every {days_str} at {new_c.time_slot.pretty()}."
+
+    def _tool_send_slack_message(self, inp: dict) -> str:
+        if self.slack is None or not self.slack.bot_token:
+            return "Slack not configured — add SLACK_BOT_TOKEN to .env to enable it."
+        channel = inp.get("channel", "meeting-times").lstrip("#")
+        message = inp.get("message", "")
+        if not message:
+            return "No message provided."
+        try:
+            channel_id = self.slack.resolve_channel_id(channel)
+            if not channel_id:
+                for cid in (self.service_config.slack_channel_ids or []):
+                    channel_id = self.slack.resolve_channel_id(cid)
+                    if channel_id:
+                        break
+            if not channel_id:
+                return f"Couldn't find Slack channel '{channel}'. Check the channel name."
+            self.slack.send_message(channel_id, message)
+            return f"✅ Sent to #{channel}: \"{message}\""
+        except Exception as exc:
+            return f"Slack error: {exc}"
+
+    def _tool_send_email(self, inp: dict) -> str:
+        import re as _re
+        to_email = inp.get("to_email", "")
+        subject = inp.get("subject", "Message from your assistant")
+        context = inp.get("context", "")
+
+        # Basic validation
+        if not _re.match(r"[^@]+@[^@]+\.[^@]+", to_email):
+            return f"Invalid email address: '{to_email}'"
+
+        # Draft via Claude (using the existing email agent)
+        from email_agent import EmailAgent
+        agent = EmailAgent(model_name="claude-haiku-4-5-20251001")
+        draft = agent.draft_email(to_email, subject, context)
+
+        if self.google and self.google.creds:
+            try:
+                self.google.send_email(to_email, subject, draft)
+                return f"✅ Email sent to {to_email}.\n\nSubject: {subject}\n\n{draft}"
+            except Exception as exc:
+                return (
+                    f"Draft ready but send failed: {exc}\n\n"
+                    f"Subject: {subject}\n\n{draft}"
+                )
+        return (
+            f"Gmail not connected (add OAuth token.json). Draft ready to copy:\n\n"
+            f"To: {to_email}\nSubject: {subject}\n\n{draft}"
+        )
+
+    # ─── Agent loop ───────────────────────────────────────────────────────────
+
+    def _content_to_dicts(self, content) -> list:
+        """Convert Anthropic SDK response blocks → plain dicts for history storage."""
+        result = []
+        for block in content:
+            block_type = getattr(block, "type", None)
+            if block_type == "text":
+                result.append({"type": "text", "text": block.text})
+            elif block_type == "tool_use":
+                result.append({
+                    "type": "tool_use",
+                    "id": block.id,
+                    "name": block.name,
+                    "input": block.input,
+                })
+        return result
+
+    def _execute_tool(self, tool_name: str, tool_input: dict) -> str:
+        """Dispatch a tool call to the right Python function."""
+        dispatch = {
+            "read_schedule":            self._tool_read_schedule,
+            "check_time_slot":          self._tool_check_time_slot,
+            "get_free_slots":           self._tool_get_free_slots,
+            "schedule_meeting":         self._tool_schedule_meeting,
+            "reschedule_commitment":    self._tool_reschedule_commitment,
+            "cancel_commitment":        self._tool_cancel_commitment,
+            "add_recurring_commitment": self._tool_add_recurring_commitment,
+            "send_slack_message":       self._tool_send_slack_message,
+            "send_email":               self._tool_send_email,
+        }
+        fn = dispatch.get(tool_name)
+        if fn is None:
+            return f"Unknown tool: {tool_name}"
+        try:
+            return str(fn(tool_input))
+        except Exception as exc:
+            return f"Tool '{tool_name}' error: {exc}"
+
+    def respond(self, user_input: str) -> str:
+        """
+        Main entry point. Takes a user message, returns a natural language reply.
+
+        Flow:
+          1. Add message to history
+          2. Call Claude with tool definitions
+          3. If Claude wants to use a tool: execute it, feed result back, repeat
+          4. When Claude has all info it needs: return the final text reply
+        """
+        if not user_input.strip():
+            return "How can I help with your schedule today?"
+
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not api_key:
+            return (
+                "⚠️  ANTHROPIC_API_KEY is not set. Add it to your .env file:\n"
+                "  ANTHROPIC_API_KEY=sk-ant-..."
+            )
+
+        try:
+            import anthropic as _anthropic
+        except ImportError:
+            return "anthropic package not installed. Run: pip install anthropic"
+
+        client = _anthropic.Anthropic(api_key=api_key)
+
+        # Add user message to history
+        self.history.append({"role": "user", "content": user_input})
+
+        # Trim history to keep context window manageable
+        messages = self.history[-self.MAX_HISTORY:]
+
+        model = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
+
+        # Tool-use agent loop (max 6 rounds before giving up)
+        for _ in range(6):
+            try:
+                response = client.messages.create(
+                    model=model,
+                    max_tokens=1024,
+                    system=self._build_system_prompt(),
+                    tools=TOOLS,
+                    messages=messages,
+                )
+            except Exception as exc:
+                return f"Claude API error: {exc}"
+
+            if response.stop_reason == "end_turn":
+                # Claude finished — extract text
+                text = next(
+                    (b.text for b in response.content if getattr(b, "type", "") == "text"),
+                    "I couldn't generate a response. Please try again.",
+                )
+                assistant_dicts = self._content_to_dicts(response.content)
+                self.history.append({"role": "assistant", "content": assistant_dicts})
+                return text
+
+            if response.stop_reason == "tool_use":
+                # Claude wants to call tools
+                assistant_dicts = self._content_to_dicts(response.content)
+                messages.append({"role": "assistant", "content": assistant_dicts})
+                self.history.append({"role": "assistant", "content": assistant_dicts})
+
+                # Execute each tool Claude requested
+                tool_results = []
+                for block in response.content:
+                    if getattr(block, "type", "") == "tool_use":
+                        result = self._execute_tool(block.name, block.input)
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": result,
+                        })
+
+                # Feed results back
+                messages.append({"role": "user", "content": tool_results})
+                self.history.append({"role": "user", "content": tool_results})
+                continue  # loop — Claude may call more tools or respond
+
+            # Unexpected stop reason (e.g. max_tokens)
+            break
+
+        return "I ran into an issue processing that. Please try again."
+
+    def clear_history(self):
+        """Reset conversation context."""
+        self.history = []
+
+    def startup_check(self) -> str:
+        """Status check — shown on app start."""
+        lines = []
+        if os.getenv("ANTHROPIC_API_KEY"):
+            lines.append("✓ Claude API: configured")
+        else:
+            lines.append("✗ Claude API: ANTHROPIC_API_KEY not set (required)")
+
+        if self.service_config.slack_enabled:
+            if self.slack and self.slack.bot_token:
+                lines.append("✓ Slack: configured")
+            else:
+                lines.append("○ Slack: SLACK_BOT_TOKEN not set")
+
+        if self.service_config.gmail_enabled or self.service_config.calendar_enabled:
+            if self.google and self.google.creds:
+                lines.append("✓ Gmail/Calendar: authenticated")
+            else:
+                lines.append("○ Gmail/Calendar: token.json missing (run Google OAuth flow)")
+
+        routine = load_routine(self.routine_path)
+        lines.append(f"✓ Routine: {len(routine)} commitment(s) loaded")
+        return "\n".join(lines)
 
 
 def main():
+    from service_config import prompt_service_selection
     service_config = prompt_service_selection()
     bot = RoutineChatbot(service_config=service_config)
     print(bot.startup_check())
-    print("\nRoutine Agent demo. Type 'exit' to quit.")
+    print("\nRoutine Agent ready. Type 'exit' to quit, 'clear' to reset context.\n")
     while True:
         try:
-            prompt = input("You: ")
-        except KeyboardInterrupt:
+            prompt = input("You: ").strip()
+        except (KeyboardInterrupt, EOFError):
             print("\nGoodbye.")
             break
-        if prompt.strip().lower() in {"exit", "quit"}:
+        if prompt.lower() in ("exit", "quit"):
             print("Goodbye.")
             break
-        print(f"Agent: {bot.respond(prompt)}")
+        if prompt.lower() == "clear":
+            bot.clear_history()
+            print("Agent: Conversation context cleared.\n")
+            continue
+        print(f"Agent: {bot.respond(prompt)}\n")
 
 
 if __name__ == "__main__":
