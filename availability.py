@@ -12,7 +12,7 @@ from typing import List, Optional, Tuple
 from models import TimeSlot, Commitment, DayOfWeek
 
 # Boundaries for "available working hours"
-WORK_START = time(8, 0)
+WORK_START = time(10, 0)
 WORK_END   = time(22, 0)
 
 # Granularity when scanning for free slots (every 30 min)

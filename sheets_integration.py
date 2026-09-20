@@ -29,7 +29,7 @@ from routine_manager import load_routine
 
 # ─── Layout constants ─────────────────────────────────────────────────────────
 
-WORK_START     = time(8, 0)
+WORK_START     = time(10, 0)
 WORK_END       = time(22, 0)
 STEP_MINUTES   = 30
 SHEET_TITLE    = "Routine Agent — Weekly Schedule"
