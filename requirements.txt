@@ -1,10 +1,20 @@
-anthropic
+# LLM providers — set ONE key in .env, the rest are optional
+anthropic          # Claude (paid) — best tool-use quality
+openai             # Used for Groq + Gemini (free) via OpenAI-compatible API
+
+# Core
 python-dotenv
 pyyaml
-slack-sdk
 requests
-mcp>=1.0,<2.0
+
+# Integrations (all optional)
+slack-sdk
 google-auth
 google-auth-oauthlib
 google-api-python-client
+
+# MCP server (for Claude Desktop)
+mcp>=1.0,<2.0
+
+# Dev
 pytest

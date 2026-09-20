@@ -276,12 +276,15 @@ class RoutineChatbot:
         sheets_status = "connected" if (self.google and getattr(self.google, "creds", None)) else "not configured"
         sheets_url    = getattr(self.tool_ctx, "sheets_url", None) or ""
         sheets_line   = f"Sheets URL: {sheets_url}" if sheets_url else "Sheets: sync will create the sheet on first mutation."
+        from llm_provider import LLMProvider
+        provider_line = f"Running on: {LLMProvider().display_name}"
 
         return (
             f"You are a personal scheduling and productivity assistant. Today is {today}.\n\n"
             f"Current routine:\n{schedule_str}\n\n"
             f"Connected services: Slack ({slack_status}), Gmail ({gmail_status}), Sheets ({sheets_status}).\n"
-            f"{sheets_line}\n\n"
+            f"{sheets_line}\n"
+            f"{provider_line}\n\n"
             "Guidelines:\n"
             "- Be conversational and concise. Never mention tool names or internal steps.\n"
             "- Always use tools for real data — never guess from memory.\n"
@@ -315,82 +318,80 @@ class RoutineChatbot:
         if not (user_input or "").strip():
             return "How can I help with your schedule today?"
 
-        api_key = os.getenv("ANTHROPIC_API_KEY")
-        if not api_key:
-            return "ANTHROPIC_API_KEY is not set. Add it to your .env file:\n  ANTHROPIC_API_KEY=sk-ant-..."
+        from llm_provider import LLMProvider
+        provider = LLMProvider()
 
-        try:
-            import anthropic as _anthropic
-        except ImportError:
-            return "anthropic package not installed. Run: pip install anthropic"
+        if not provider.is_configured:
+            return provider.not_configured_message()
 
-        text = user_input.strip()
-
-        # ── Pending email shortcut ─────────────────────────────────────────
-        # Intercept confirm/cancel before hitting the LLM to be snappy
+        text    = user_input.strip()
         import re
         lowered = text.lower()
+
+        # ── Pending email shortcut (fast-path, no LLM needed) ─────────────
         if self.tool_ctx.pending_email:
             if re.search(r"\b(send it|confirm|yes[,.]? send|approve)\b", lowered):
                 return execute_tool(self.tool_ctx, "confirm_pending_email", {"confirm": "yes"})
             if re.search(r"\b(cancel|reject|don't send|do not send|no)\b", lowered):
                 return execute_tool(self.tool_ctx, "confirm_pending_email", {"confirm": "no"})
 
-        client = _anthropic.Anthropic(api_key=api_key)
         self.history.append({"role": "user", "content": text})
         messages = self.history[-self.MAX_HISTORY:]
 
-        # Primary model with automatic fallback on model-not-found errors
-        model = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
-        fallback = os.getenv("CLAUDE_FALLBACK_MODEL", "claude-3-5-haiku-latest")
+        for _ in range(6):  # max tool-use rounds
+            result = provider.create_message(
+                messages=messages,
+                anthropic_tools=ANTHROPIC_TOOLS,
+                system=self._build_system_prompt(),
+            )
 
-        for _ in range(6):  # max tool rounds
-            try:
-                response = client.messages.create(
-                    model=model,
-                    max_tokens=1024,
-                    system=self._build_system_prompt(),
-                    tools=ANTHROPIC_TOOLS,
-                    messages=messages,
-                )
-            except Exception as exc:
-                # Auto-retry with fallback if the model string is wrong
-                if model != fallback and "model" in str(exc).lower():
-                    model = fallback
-                    continue
-                return f"Claude API error: {exc}"
+            if result["stop_reason"] == "end_turn":
+                text_out = result["text"] or "I couldn't generate a response. Please try again."
 
-            stop = getattr(response, "stop_reason", None)
+                # Store in history as Anthropic-format content blocks
+                if result.get("_raw"):
+                    # Anthropic provider — raw SDK blocks available
+                    assistant_dicts = self._content_to_dicts(result["_raw"])
+                else:
+                    # Groq / Gemini — synthesise Anthropic-format block
+                    assistant_dicts = [{"type": "text", "text": text_out}]
 
-            if stop == "end_turn":
-                text_out = next(
-                    (b.text for b in response.content if getattr(b, "type", "") == "text"),
-                    "I couldn't generate a response. Please try again.",
-                )
-                self.history.append({"role": "assistant", "content": self._content_to_dicts(response.content)})
+                self.history.append({"role": "assistant", "content": assistant_dicts})
                 return text_out
 
-            if stop == "tool_use":
-                assistant_dicts = self._content_to_dicts(response.content)
-                messages.append({"role": "assistant", "content": assistant_dicts})
-                self.history.append({"role": "assistant", "content": assistant_dicts})
+            if result["stop_reason"] == "tool_use":
+                tool_calls = result["tool_calls"]
 
+                # Build assistant message in Anthropic format (canonical history format)
+                assistant_content: list = []
+                if result.get("text"):
+                    assistant_content.append({"type": "text", "text": result["text"]})
+                for tc in tool_calls:
+                    assistant_content.append({
+                        "type":  "tool_use",
+                        "id":    tc["id"],
+                        "name":  tc["name"],
+                        "input": tc["input"],
+                    })
+
+                messages.append({"role": "assistant", "content": assistant_content})
+                self.history.append({"role": "assistant", "content": assistant_content})
+
+                # Execute each tool
                 tool_results = []
-                for block in response.content:
-                    if getattr(block, "type", "") == "tool_use":
-                        # All tool logic lives in mcp_tools.execute()
-                        result = execute_tool(self.tool_ctx, block.name, dict(block.input or {}))
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": result,
-                        })
+                for tc in tool_calls:
+                    res = execute_tool(self.tool_ctx, tc["name"], dict(tc["input"] or {}))
+                    tool_results.append({
+                        "type":        "tool_result",
+                        "tool_use_id": tc["id"],
+                        "content":     res,
+                    })
 
                 messages.append({"role": "user", "content": tool_results})
                 self.history.append({"role": "user", "content": tool_results})
                 continue
 
-            break  # unexpected stop_reason
+            break
 
         return "I ran into an issue processing that. Please try again."
 
@@ -399,11 +400,14 @@ class RoutineChatbot:
         self.tool_ctx.pending_email = None
 
     def startup_check(self) -> str:
+        from llm_provider import LLMProvider
         lines = []
-        if os.getenv("ANTHROPIC_API_KEY"):
-            lines.append("Claude API: configured")
+        p = LLMProvider()
+        if p.is_configured:
+            lines.append(f"LLM provider: {p.display_name}")
         else:
-            lines.append("Claude API: ANTHROPIC_API_KEY not set (required)")
+            lines.append("LLM provider: NONE CONFIGURED")
+            lines.append("  Free options: GROQ_API_KEY (console.groq.com) or GEMINI_API_KEY (aistudio.google.com)")
         if self.service_config.slack_enabled:
             if self.slack and getattr(self.slack, "bot_token", None):
                 lines.append("Slack: configured")
