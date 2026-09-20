@@ -191,6 +191,16 @@ ANTHROPIC_TOOLS = [
         "description": "Check which services (Slack, Gmail, Calendar) are configured.",
         "input_schema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "sync_to_sheets",
+        "description": (
+            "Sync the full weekly schedule to Google Sheets and return the sheet URL. "
+            "Called automatically after meetings are added, rescheduled, or cancelled. "
+            "Also call this when the user asks to 'open the sheet', 'show the spreadsheet', "
+            "'update the sheet', or 'what does my sheet look like'."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
 ]
 
 
@@ -261,13 +271,17 @@ class RoutineChatbot:
             schedule_lines.append(f"  - {c.title}: {days}, {c.time_slot.pretty()}{lock} (priority {c.priority})")
         schedule_str = "\n".join(schedule_lines) or "  (no commitments yet)"
 
-        slack_status = "connected" if (self.slack and getattr(self.slack, "bot_token", None)) else "not configured"
-        gmail_status = "connected" if (self.google and getattr(self.google, "creds", None)) else "not configured"
+        slack_status  = "connected" if (self.slack and getattr(self.slack, "bot_token", None)) else "not configured"
+        gmail_status  = "connected" if (self.google and getattr(self.google, "creds", None)) else "not configured"
+        sheets_status = "connected" if (self.google and getattr(self.google, "creds", None)) else "not configured"
+        sheets_url    = getattr(self.tool_ctx, "sheets_url", None) or ""
+        sheets_line   = f"Sheets URL: {sheets_url}" if sheets_url else "Sheets: sync will create the sheet on first mutation."
 
         return (
             f"You are a personal scheduling and productivity assistant. Today is {today}.\n\n"
             f"Current routine:\n{schedule_str}\n\n"
-            f"Connected services: Slack ({slack_status}), Gmail ({gmail_status}).\n\n"
+            f"Connected services: Slack ({slack_status}), Gmail ({gmail_status}), Sheets ({sheets_status}).\n"
+            f"{sheets_line}\n\n"
             "Guidelines:\n"
             "- Be conversational and concise. Never mention tool names or internal steps.\n"
             "- Always use tools for real data — never guess from memory.\n"

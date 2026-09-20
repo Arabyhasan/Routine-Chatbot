@@ -104,6 +104,17 @@ HTML = """<!DOCTYPE html>
         }
         button#sendButton:hover { filter: brightness(1.08); }
         button#sendButton:disabled { opacity: .5; cursor: not-allowed; }
+        .sheet-btn {
+            border: 1px solid var(--border); background: rgba(31,41,55,0.9);
+            color: var(--text); border-radius: 10px; padding: 8px 12px;
+            font-size: .85rem; cursor: pointer; white-space: nowrap;
+        }
+        .sheet-btn:hover { background: rgba(55,65,81,0.9); }
+        .sheet-link {
+            color: var(--accent); font-size: .85rem; text-decoration: none;
+            white-space: nowrap; padding: 8px 4px;
+        }
+        .sheet-link:hover { text-decoration: underline; }
     </style>
 </head>
 <body>
@@ -122,6 +133,8 @@ HTML = """<!DOCTYPE html>
             <option value="slack">Slack only</option>
             <option value="calendar">Calendar only</option>
         </select>
+        <button class="sheet-btn" id="sheetSyncBtn" type="button">📊 Sync Sheet</button>
+        <a class="sheet-link" id="sheetLink" href="#" target="_blank" style="display:none">Open Sheet ↗</a>
     </div>
     <div class="messages" id="messages"></div>
     <div class="hints">
@@ -218,6 +231,41 @@ HTML = """<!DOCTYPE html>
     input.addEventListener('keydown', e => { if (e.key === 'Enter') sendMessage(); });
     svcSelect.addEventListener('change', updateMode);
 
+    async function syncSheet() {
+        const btn = document.getElementById('sheetSyncBtn');
+        btn.textContent = '⏳ Syncing…';
+        btn.disabled = true;
+        try {
+            const res  = await fetch('/api/sheet-sync', {method: 'POST'});
+            const data = await res.json();
+            if (data.url) {
+                const link = document.getElementById('sheetLink');
+                link.href = data.url;
+                link.style.display = 'inline';
+                addMessage('📊 Sheet updated — ' + data.url, 'bot');
+            } else {
+                addMessage(data.error || 'Sheet sync failed.', 'bot');
+            }
+        } catch { addMessage('Sheet sync unavailable.', 'bot'); }
+        btn.textContent = '📊 Sync Sheet';
+        btn.disabled = false;
+    }
+
+    document.getElementById('sheetSyncBtn').addEventListener('click', syncSheet);
+
+    // Restore sheet link if available from previous sync
+    (async () => {
+        try {
+            const res = await fetch('/api/sheet-url');
+            const data = await res.json();
+            if (data.url) {
+                const link = document.getElementById('sheetLink');
+                link.href = data.url;
+                link.style.display = 'inline';
+            }
+        } catch {}
+    })();
+
     addMessage('Hi! I can help with your schedule, meetings, Slack messages, and emails. What can I do for you?', 'bot');
     input.focus();
     checkStatus();
@@ -267,8 +315,21 @@ class ChatHandler(BaseHTTPRequestHandler):
                 "slack":     "ready"   if (bot.service_config.slack_enabled    and bot.slack    and bot.slack.bot_token)        else "missing",
                 "gmail":     "ready"   if (bot.service_config.gmail_enabled    and bot.google   and bot.google.creds is not None) else "missing",
                 "calendar":  "ready"   if (bot.service_config.calendar_enabled and bot.google   and bot.google.creds is not None) else "missing",
+                "sheets":    "ready"   if (bot.google and bot.google.creds is not None) else "missing",
             })
             return
+
+        if self.path == "/api/sheet-url":
+            try:
+                from sheets_integration import STATE_FILE
+                import json as _json
+                with open(STATE_FILE) as f:
+                    state = _json.load(f)
+                self._send_json(200, {"url": state.get("sheet_url", "")})
+            except Exception:
+                self._send_json(200, {"url": ""})
+            return
+
         self.send_response(404); self.end_headers()
 
     def do_POST(self):
@@ -293,6 +354,19 @@ class ChatHandler(BaseHTTPRequestHandler):
             msg = str(payload.get("message", "")).strip()
             reply = bot.respond(msg) if msg else "Please enter a message."
             self._send_json(200, {"reply": reply})
+            return
+
+        if self.path == "/api/sheet-sync":
+            if bot.google and bot.google.creds:
+                try:
+                    si = bot.google.get_sheets_integration()
+                    url = si.sync(bot.tool_ctx.routine_path)
+                    bot.tool_ctx.sheets_url = url
+                    self._send_json(200, {"url": url})
+                except Exception as exc:
+                    self._send_json(200, {"error": str(exc)})
+            else:
+                self._send_json(200, {"error": "Google not connected — add credentials.json and run: python google_integration.py"})
             return
 
         self.send_response(404); self.end_headers()

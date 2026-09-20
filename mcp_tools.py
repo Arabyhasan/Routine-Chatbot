@@ -119,6 +119,7 @@ class ToolContext:
     knowledge_base: Any = None
     service_config: Any = None
     pending_email: Optional[dict] = None   # email draft awaiting user confirmation
+    sheets_url: Optional[str] = None         # last synced sheet URL (set by _auto_sync_sheets)
 
 
 # ─── Tool implementations ─────────────────────────────────────────────────────
@@ -214,11 +215,14 @@ def tool_schedule_meeting(ctx: ToolContext, inp: dict) -> str:
         existing.append(new_c)
         save_routine(existing, ctx.routine_path)
 
-    return (
+    result = (
         f"Action: {decision.action}. "
         f"{decision.reply_message} "
         f"(Reasoning: {decision.reasoning})"
     )
+    if decision.action in ("confirm", "reschedule_and_confirm"):
+        result += _auto_sync_sheets(ctx)
+    return result
 
 
 def tool_reschedule_commitment(ctx: ToolContext, inp: dict) -> str:
@@ -243,7 +247,8 @@ def tool_reschedule_commitment(ctx: ToolContext, inp: dict) -> str:
     match.time_slot = TimeSlot(start=new_start, end=end_dt.time())
     match.notes = f"Rescheduled from {old_pretty} via assistant."
     save_routine(commitments, ctx.routine_path)
-    return f"Moved '{match.title}' from {old_pretty} to {match.time_slot.pretty()}."
+    result = f"Moved '{match.title}' from {old_pretty} to {match.time_slot.pretty()}."
+    return result + _auto_sync_sheets(ctx)
 
 
 def tool_cancel_commitment(ctx: ToolContext, inp: dict) -> str:
@@ -257,7 +262,8 @@ def tool_cancel_commitment(ctx: ToolContext, inp: dict) -> str:
         return f"No commitment named '{title}'. Existing: {names}."
     removed = len(commitments) - len(updated)
     save_routine(updated, ctx.routine_path)
-    return f"Removed {removed} commitment(s) matching '{title}'."
+    result = f"Removed {removed} commitment(s) matching '{title}'."
+    return result + _auto_sync_sheets(ctx)
 
 
 def tool_add_recurring_commitment(ctx: ToolContext, inp: dict) -> str:
@@ -297,7 +303,8 @@ def tool_add_recurring_commitment(ctx: ToolContext, inp: dict) -> str:
     existing.append(new_c)
     save_routine(existing, ctx.routine_path)
     days_str = ", ".join(d.value for d in day_enums)
-    return f"Added '{title}' every {days_str} at {new_c.time_slot.pretty()}."
+    result = f"Added '{title}' every {days_str} at {new_c.time_slot.pretty()}."
+    return result + _auto_sync_sheets(ctx)
 
 
 def tool_send_slack_message(ctx: ToolContext, inp: dict) -> str:
@@ -428,6 +435,42 @@ def tool_health_check(ctx: ToolContext, inp: dict) -> str:
     return "\n".join(parts)
 
 
+# ─── Sheets auto-sync ────────────────────────────────────────────────────────
+
+def _auto_sync_sheets(ctx: ToolContext) -> str:
+    """
+    Called automatically after any mutation (schedule/reschedule/cancel/add).
+    Returns a short status string to append to the tool result.
+    Silently skips if Google credentials are not configured.
+    """
+    if ctx.google is None or not getattr(ctx.google, "creds", None):
+        return ""
+    try:
+        si = ctx.google.get_sheets_integration()
+        url = si.sync(ctx.routine_path)
+        ctx.sheets_url = url   # stash so web_app can display it
+        return f"\n📊 Sheet updated: {url}"
+    except Exception as exc:
+        return f"\n(Sheets sync failed: {exc})"
+
+
+def tool_sync_to_sheets(ctx: ToolContext, inp: dict) -> str:
+    """Manually trigger a full sheet sync. Returns the sheet URL."""
+    if ctx.google is None or not getattr(ctx.google, "creds", None):
+        return (
+            "Google credentials not configured. "
+            "Add credentials.json and run: python google_integration.py\n"
+            "Make sure the Sheets scope is included (delete token.json if you already have one)."
+        )
+    try:
+        si = ctx.google.get_sheets_integration()
+        url = si.sync(ctx.routine_path)
+        ctx.sheets_url = url
+        return f"Schedule synced to Google Sheets:\n{url}"
+    except Exception as exc:
+        return f"Sheets sync error: {exc}"
+
+
 # ─── Dispatch table ───────────────────────────────────────────────────────────
 # Used by both chatbot.py and mcp_server.py
 
@@ -446,6 +489,7 @@ TOOL_DISPATCH: dict = {
     "recall_memory":            tool_recall_memory,
     "get_configured_requesters": tool_get_configured_requesters,
     "health_check":             tool_health_check,
+    "sync_to_sheets":           tool_sync_to_sheets,
 }
 
 

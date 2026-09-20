@@ -15,7 +15,11 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/spreadsheets",   # Sheets read/write
+    "https://www.googleapis.com/auth/drive.file",     # find/create files in Drive
 ]
+# NOTE: if you already have token.json from before Sheets was added,
+# delete it and re-run `python google_integration.py` to re-authenticate.
 
 
 class GoogleIntegration:
@@ -52,6 +56,21 @@ class GoogleIntegration:
         if self.creds is None:
             raise RuntimeError("Gmail credentials are not configured. Add credentials.json or set up a token first.")
         return build("gmail", "v1", credentials=self.creds)
+
+    def get_sheets_service(self):
+        if self.creds is None:
+            raise RuntimeError("Google credentials not configured. Run: python google_integration.py")
+        return build("sheets", "v4", credentials=self.creds)
+
+    def get_drive_service(self):
+        if self.creds is None:
+            raise RuntimeError("Google credentials not configured. Run: python google_integration.py")
+        return build("drive", "v3", credentials=self.creds)
+
+    def get_sheets_integration(self):
+        """Return a ready SheetsIntegration instance (needs Sheets + Drive scopes)."""
+        from sheets_integration import SheetsIntegration
+        return SheetsIntegration(self.creds)
 
     def list_upcoming_events(self, max_results: int = 10) -> List[Dict[str, Any]]:
         service = self.get_calendar_service()
