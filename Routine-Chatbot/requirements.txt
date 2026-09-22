@@ -14,7 +14,7 @@ google-auth-oauthlib
 google-api-python-client
 
 # MCP server (for Claude Desktop)
-mcp[cli]>=2.0,<3.0
+mcp>=1.0,<2.0
 
 # Dev
 pytest

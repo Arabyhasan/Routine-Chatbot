@@ -3,13 +3,13 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional
 
-from env_loader import load_project_env
+from dotenv import load_dotenv
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-load_project_env()
+load_dotenv()
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",

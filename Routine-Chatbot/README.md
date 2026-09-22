@@ -13,8 +13,7 @@ Built as an internship project at Talentier exploring Claude tool-use, MCP serve
 - **Google Sheets sync** — a live weekly schedule (10 AM–10 PM, Mon–Sun with real dates) updates automatically every time a meeting is added, rescheduled, or cancelled; rolls to the next week every Monday
 - **Slack and Gmail integration** — drafts and sends messages and emails via Claude
 - **Multi-turn conversation** — context is kept across turns so follow-up messages work naturally
-- **MCP server** - exposes all scheduling tools to Claude Desktop or any MCP-compatible host
-- **Live weather** - Claude can look up current weather through a local MCP tool (no weather API key required)
+- **MCP server** — exposes all scheduling tools to Claude Desktop or any MCP-compatible host
 - **Free to run** — works with Groq or Gemini if you don't have an Anthropic key
 
 ---
@@ -102,14 +101,13 @@ conflict_resolution:
 
 ---
 
-## Tools available to the agent (16 total)
+## Tools available to the agent (15 total)
 
 | Tool | What it does |
 |---|---|
 | `read_schedule` | Load commitments for a day |
 | `check_time_slot` | Is a specific time free? |
 | `get_free_slots` | What times are open today? |
-| `get_weather` | Live current weather for a city |
 | `schedule_meeting` | Book via priority engine |
 | `reschedule_commitment` | Move an existing item |
 | `cancel_commitment` | Remove from routine |
@@ -164,27 +162,6 @@ python chatbot.py
 ```bash
 python mcp_server.py
 ```
-
-### Connect it to Claude Desktop
-
-1. Install the dependencies in the project virtual environment: `python -m pip install -r requirements.txt`.
-2. In Claude Desktop, open **Settings → Developer → Edit Config**.
-3. Add this entry under `mcpServers` (adjust the Python path if your environment is elsewhere):
-
-```json
-{
-  "mcpServers": {
-    "routine-agent": {
-      "command": "C:\\Users\\araby\\Routine-Chatbot\\.venv\\Scripts\\python.exe",
-      "args": ["C:\\Users\\araby\\Routine-Chatbot\\mcp_server.py"]
-    }
-  }
-}
-```
-
-4. Restart Claude Desktop, then ask: `What's the weather in Dhaka?`
-
-Claude Desktop starts this local server over stdio; do not run a second copy in a terminal.
 
 ---
 

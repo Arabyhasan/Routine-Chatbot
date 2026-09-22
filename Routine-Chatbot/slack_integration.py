@@ -3,11 +3,11 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List
 
-from env_loader import load_project_env
+from dotenv import load_dotenv
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-load_project_env()
+load_dotenv()
 
 
 class SlackIntegration:

@@ -13,19 +13,29 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List
 
-from env_loader import load_project_env
-load_project_env()
+from dotenv import load_dotenv
+load_dotenv()
 
 from mcp_tools import ToolContext, execute as _execute
 from config_loader import Config
 from service_config import ServiceConfig
 
-# The current MCP Python SDK calls its high-level server MCPServer. The web
-# chatbot does not require MCP; this process is specifically for MCP hosts such
-# as Claude Desktop.
-from mcp.server import MCPServer
-
-mcp = MCPServer("routine-agent")
+# mcp v1 uses FastMCP; v2 renamed it to MCPServer.
+# The web chatbot doesn't need mcp at all — this file is only for Claude Desktop.
+# Pin to mcp<2 in requirements.txt; this guard handles both just in case.
+try:
+    from mcp.server.fastmcp import FastMCP
+    mcp = FastMCP("routine-agent")
+except (ImportError, ModuleNotFoundError):
+    try:
+        from mcp.server.mcpserver import MCPServer as FastMCP  # type: ignore[no-redef]
+        mcp = FastMCP("routine-agent")
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise SystemExit(
+            f"mcp package not installed or incompatible version ({exc}).\n"
+            "Install with: pip install 'mcp<2'\n"
+            "The web chatbot (web_app.py) works without this."
+        ) from exc
 
 
 def _ctx() -> ToolContext:
@@ -85,11 +95,6 @@ def get_free_slots(day: str = "today", duration_minutes: int = 60) -> str:
 def get_free_slots_for_today(duration_minutes: int = 60) -> List[str]:
     """Get free slots for today (convenience alias)."""
     return [_call("get_free_slots", day="today", duration_minutes=duration_minutes)]
-
-@mcp.tool()
-def get_weather(city: str) -> str:
-    """Get live current weather for a city, such as 'Dhaka, Bangladesh'."""
-    return _call("get_weather", city=city)
 
 @mcp.tool()
 def schedule_meeting(

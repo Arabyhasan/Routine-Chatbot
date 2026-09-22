@@ -23,7 +23,6 @@ from config_loader import Config
 from models import Commitment, DayOfWeek, MeetingRequest, TimeSlot
 from priority import handle_meeting_request
 from routine_manager import load_routine, save_routine
-from weather_service import get_current_weather
 
 
 # ─── Shared parsing helpers ───────────────────────────────────────────────────
@@ -171,11 +170,6 @@ def tool_get_free_slots(ctx: ToolContext, inp: dict) -> str:
         return f"No free {duration}-minute gaps on {target.strftime('%A, %B %d')}."
     pretty = [s.pretty() for s in slots[:6]]
     return f"Free {duration}-min slots on {target.strftime('%A, %B %d')}: {', '.join(pretty)}."
-
-
-def tool_get_weather(ctx: ToolContext, inp: dict) -> str:
-    """Look up live current weather for a city."""
-    return get_current_weather(str(inp.get("city", "")))
 
 
 def tool_schedule_meeting(ctx: ToolContext, inp: dict) -> str:
@@ -484,7 +478,6 @@ TOOL_DISPATCH: dict = {
     "read_schedule":            tool_read_schedule,
     "check_time_slot":          tool_check_time_slot,
     "get_free_slots":           tool_get_free_slots,
-    "get_weather":              tool_get_weather,
     "schedule_meeting":         tool_schedule_meeting,
     "reschedule_commitment":    tool_reschedule_commitment,
     "cancel_commitment":        tool_cancel_commitment,

@@ -13,8 +13,8 @@ import os
 from datetime import date
 from pathlib import Path
 
-from env_loader import load_project_env
-load_project_env()
+from dotenv import load_dotenv
+load_dotenv()
 
 from config_loader import Config
 from google_integration import GoogleIntegration
@@ -64,17 +64,6 @@ ANTHROPIC_TOOLS = [
                 "day": {"type": "string", "default": "today"},
                 "duration_minutes": {"type": "integer", "default": 60},
             },
-        },
-    },
-    {
-        "name": "get_weather",
-        "description": "Get live current weather for a city. Use this for weather questions; never invent weather information.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "city": {"type": "string", "description": "City and optional country, e.g. 'Dhaka, Bangladesh'"}
-            },
-            "required": ["city"],
         },
     },
     {
