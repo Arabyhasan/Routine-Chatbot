@@ -45,11 +45,18 @@ def _ctx() -> ToolContext:
             google = GoogleIntegration()
         except Exception:
             pass
+    knowledge_base = None
+    try:
+        from knowledge_base import UserKnowledgeBase
+        knowledge_base = UserKnowledgeBase("knowledge_store.json")
+    except Exception:
+        pass
     return ToolContext(
         config=Config("config.yaml"),
         routine_path="routine.json",
         slack=slack,
         google=google,
+        knowledge_base=knowledge_base,
         service_config=svc,
     )
 
@@ -162,6 +169,26 @@ def get_configured_requesters() -> str:
 def health_check() -> str:
     """Check which services are configured and working."""
     return _call("health_check")
+
+@mcp.tool()
+def confirm_pending_email(confirm: str) -> str:
+    """Send or cancel the pending email draft after user confirmation ('yes' or 'no')."""
+    return _call("confirm_pending_email", confirm=confirm)
+
+@mcp.tool()
+def remember_fact(fact: str, category: str = "preferences") -> str:
+    """Store a user preference or personal fact for future reference."""
+    return _call("remember_fact", fact=fact, category=category)
+
+@mcp.tool()
+def recall_memory() -> str:
+    """Recall stored facts and preferences about the user."""
+    return _call("recall_memory")
+
+@mcp.tool()
+def sync_to_sheets() -> str:
+    """Sync the full weekly schedule to Google Sheets and return the sheet URL."""
+    return _call("sync_to_sheets")
 
 
 if __name__ == "__main__":

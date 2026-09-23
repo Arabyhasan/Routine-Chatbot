@@ -397,7 +397,7 @@ def tool_remember_fact(ctx: ToolContext, inp: dict) -> str:
         return "No fact provided."
     if ctx.knowledge_base:
         try:
-            ctx.knowledge_base.store(category, fact)
+            ctx.knowledge_base.add_fact(fact, category=category, source="user")
             return f"Remembered: {fact}"
         except Exception as exc:
             return f"Could not save to knowledge base: {exc}"
@@ -407,7 +407,7 @@ def tool_remember_fact(ctx: ToolContext, inp: dict) -> str:
 def tool_recall_memory(ctx: ToolContext, inp: dict) -> str:
     if ctx.knowledge_base:
         try:
-            return ctx.knowledge_base.recall_all() or "Nothing stored yet."
+            return ctx.knowledge_base.build_profile_summary() or "Nothing stored yet."
         except Exception as exc:
             return f"Could not read knowledge base: {exc}"
     return "Knowledge base not connected."

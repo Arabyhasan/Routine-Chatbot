@@ -253,8 +253,8 @@ class RoutineChatbot:
 
         # Load knowledge base if available
         try:
-            from knowledge_base import KnowledgeBase
-            self.knowledge_base = KnowledgeBase(knowledge_base_path)
+            from knowledge_base import UserKnowledgeBase
+            self.knowledge_base = UserKnowledgeBase(knowledge_base_path)
         except Exception:
             self.knowledge_base = None
 
@@ -269,6 +269,25 @@ class RoutineChatbot:
         )
 
         self.history: list[dict] = []
+
+        # Optional real MCP client (mcp_client.MCPClient). When set, routine
+        # summary / free-slot lookups are delegated to it instead of the
+        # in-process tool layer. None by default — chatbot.py works standalone.
+        self.mcp_client = None
+
+    # ─── MCP delegation helpers ─────────────────────────────────────────────
+
+    def _mcp_routine_summary(self) -> str:
+        """Get a routine summary, via the MCP client if one is attached."""
+        if self.mcp_client is not None:
+            return self.mcp_client.get_routine_summary()
+        return execute_tool(self.tool_ctx, "read_schedule", {"day": "today"})
+
+    def _mcp_free_slots(self):
+        """Get today's free slots, via the MCP client if one is attached."""
+        if self.mcp_client is not None:
+            return self.mcp_client.get_free_slots_for_today()
+        return execute_tool(self.tool_ctx, "get_free_slots", {"day": "today"})
 
     # ─── System prompt ────────────────────────────────────────────────────────
 
