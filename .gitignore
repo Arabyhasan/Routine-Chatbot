@@ -18,3 +18,5 @@ processed_messages.json
 build/
 dist/
 *.spec
+
+.slack_mcp_tokens.json
