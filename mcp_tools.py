@@ -22,7 +22,7 @@ from availability import get_free_slots, is_slot_free
 from config_loader import Config
 from models import Commitment, DayOfWeek, MeetingRequest, TimeSlot
 from priority import handle_meeting_request
-from routine_manager import load_routine, save_routine
+from routine_manager import load_routine, save_routine, routine_transaction
 from weather_service import get_current_weather
 
 
@@ -217,9 +217,39 @@ def tool_schedule_meeting(ctx: ToolContext, inp: dict) -> str:
             reschedulable=False,
             notes=f"Scheduled via assistant on {date.today()}",
         )
-        existing = load_routine(ctx.routine_path)
-        existing.append(new_c)
-        save_routine(existing, ctx.routine_path)
+        with routine_transaction(ctx.routine_path) as existing:
+            moved_note = ""
+            if decision.action == "reschedule_and_confirm" and decision.rescheduled_commitment:
+                # BUG FIX: the decision text claims the conflicting commitment was
+                # moved, but nothing ever actually moved it — it stayed at the same
+                # time as the new meeting, creating a real double-booking. Actually
+                # relocate it to a free slot on the same day before adding the new one.
+                displaced = decision.rescheduled_commitment
+                displaced_duration = displaced.time_slot.duration_minutes()
+                same_day_others = [
+                    c for c in existing
+                    if c.id != displaced.id and day_enum in c.days
+                ] + [new_c]  # the new meeting itself also occupies time now
+                free_slots = get_free_slots(target, same_day_others, displaced_duration)
+                if free_slots:
+                    new_slot_for_displaced = free_slots[0]
+                    for c in existing:
+                        if c.id == displaced.id:
+                            c.time_slot = new_slot_for_displaced
+                            c.notes = (c.notes + " " if c.notes else "") + \
+                                f"Auto-rescheduled from {displaced.time_slot.pretty()} to make room for '{title}' on {target}."
+                            moved_note = f" '{displaced.title}' was moved to {new_slot_for_displaced.pretty()}."
+                            break
+                else:
+                    # No free slot to move it to — don't silently claim success.
+                    # Remove it instead of leaving a phantom double-booking, and
+                    # say so plainly rather than pretending it was rescheduled.
+                    existing[:] = [c for c in existing if c.id != displaced.id]
+                    moved_note = f" I couldn't find another slot for '{displaced.title}' today, so it was removed — please reschedule it manually."
+
+            existing.append(new_c)
+        if moved_note:
+            decision.reply_message += moved_note
 
     result = (
         f"Action: {decision.action}. "
@@ -234,40 +264,52 @@ def tool_schedule_meeting(ctx: ToolContext, inp: dict) -> str:
 def tool_reschedule_commitment(ctx: ToolContext, inp: dict) -> str:
     title = inp.get("commitment_title", "")
     new_time_str = inp.get("new_time", "")
-    commitments = load_routine(ctx.routine_path)
-
-    match = next((c for c in commitments if c.title.lower() == title.lower()), None)
-    if match is None:
-        match = next((c for c in commitments if title.lower() in c.title.lower()), None)
-    if match is None:
-        names = ", ".join(c.title for c in commitments)
-        return f"No commitment named '{title}'. Existing: {names}."
 
     new_start = parse_time_str(new_time_str)
     if new_start is None:
         return f"Couldn't parse new time '{new_time_str}'."
 
-    old_pretty = match.time_slot.pretty()
-    old_dur = match.time_slot.duration_minutes()
-    end_dt = datetime.combine(date.today(), new_start) + timedelta(minutes=old_dur)
-    match.time_slot = TimeSlot(start=new_start, end=end_dt.time())
-    match.notes = f"Rescheduled from {old_pretty} via assistant."
-    save_routine(commitments, ctx.routine_path)
-    result = f"Moved '{match.title}' from {old_pretty} to {match.time_slot.pretty()}."
+    old_pretty = None
+    new_pretty = None
+    error = None
+    with routine_transaction(ctx.routine_path) as commitments:
+        match = next((c for c in commitments if c.title.lower() == title.lower()), None)
+        if match is None:
+            match = next((c for c in commitments if title.lower() in c.title.lower()), None)
+        if match is None:
+            names = ", ".join(c.title for c in commitments)
+            error = f"No commitment named '{title}'. Existing: {names}."
+        else:
+            old_pretty = match.time_slot.pretty()
+            old_dur = match.time_slot.duration_minutes()
+            end_dt = datetime.combine(date.today(), new_start) + timedelta(minutes=old_dur)
+            match.time_slot = TimeSlot(start=new_start, end=end_dt.time())
+            match.notes = f"Rescheduled from {old_pretty} via assistant."
+            new_pretty = match.time_slot.pretty()
+
+    if error:
+        return error
+    result = f"Moved '{title}' from {old_pretty} to {new_pretty}."
     return result + _auto_sync_sheets(ctx)
 
 
 def tool_cancel_commitment(ctx: ToolContext, inp: dict) -> str:
     title = inp.get("commitment_title", "")
-    commitments = load_routine(ctx.routine_path)
-    updated = [c for c in commitments if c.title.lower() != title.lower()]
-    if len(updated) == len(commitments):
-        updated = [c for c in commitments if title.lower() not in c.title.lower()]
-    if len(updated) == len(commitments):
-        names = ", ".join(c.title for c in commitments)
-        return f"No commitment named '{title}'. Existing: {names}."
-    removed = len(commitments) - len(updated)
-    save_routine(updated, ctx.routine_path)
+    removed = 0
+    error = None
+    with routine_transaction(ctx.routine_path) as commitments:
+        before = len(commitments)
+        commitments[:] = [c for c in commitments if c.title.lower() != title.lower()]
+        if len(commitments) == before:
+            commitments[:] = [c for c in commitments if title.lower() not in c.title.lower()]
+        if len(commitments) == before:
+            names = ", ".join(c.title for c in commitments)
+            error = f"No commitment named '{title}'. Existing: {names}."
+        else:
+            removed = before - len(commitments)
+
+    if error:
+        return error
     result = f"Removed {removed} commitment(s) matching '{title}'."
     return result + _auto_sync_sheets(ctx)
 
@@ -304,10 +346,9 @@ def tool_add_recurring_commitment(ctx: ToolContext, inp: dict) -> str:
         reschedulable=cfg.get("reschedulable", True),
         notes=f"Added via assistant on {date.today()}",
     )
-    existing = load_routine(ctx.routine_path)
-    existing = [c for c in existing if c.title.lower() != title.lower()]
-    existing.append(new_c)
-    save_routine(existing, ctx.routine_path)
+    with routine_transaction(ctx.routine_path) as commitments:
+        commitments[:] = [c for c in commitments if c.title.lower() != title.lower()]
+        commitments.append(new_c)
     days_str = ", ".join(d.value for d in day_enums)
     result = f"Added '{title}' every {days_str} at {new_c.time_slot.pretty()}."
     return result + _auto_sync_sheets(ctx)

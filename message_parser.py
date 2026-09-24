@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, Optional
 
 from models import DayOfWeek, MeetingRequest, TimeSlot
@@ -15,7 +15,7 @@ def _parse_time_value(value: str):
     if re.match(r"^\d{1,2}:\d{2}\s*(am|pm)?$", value):
         time_part, suffix = re.match(r"^(\d{1,2}):(\d{2})\s*(am|pm)?$", value, re.I).groups()
         hour = int(time_part)
-        minute = int(suffix or "0") if False else int(re.match(r"^(\d{1,2}):(\d{2})", value).group(2))
+        minute = int(re.match(r"^(\d{1,2}):(\d{2})", value).group(2))
         suffix = (suffix or "").lower()
         if suffix == "pm" and hour < 12:
             hour += 12
@@ -142,7 +142,12 @@ def parse_meeting_request_text(text: str, sender_id: str, sender_name: str, chan
         )
 
     if "tomorrow" in normalized:
-        requested_date = requested_date.replace(day=requested_date.day + 1) if requested_date.day < 28 else requested_date
+        # BUG FIX: this used to be
+        #   requested_date.replace(day=requested_date.day + 1) if requested_date.day < 28 else requested_date
+        # which silently failed to advance the date at all on the 28th-31st of
+        # every month (and would have crashed on shorter months even within
+        # `< 28`). timedelta handles every month length and year correctly.
+        requested_date = requested_date + timedelta(days=1)
 
     lower = normalized
     if any(word in lower for word in ["at night", "night", "tonight", "this evening", "evening"]):
