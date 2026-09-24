@@ -18,33 +18,53 @@ from slack_integration import SlackIntegration
 
 
 class ProcessedMessageStore:
-    """Dedupe incoming Slack/Gmail messages to avoid processing the same message twice."""
+    """Dedupe incoming Slack/Gmail messages to avoid processing the same message twice.
 
-    def __init__(self, path: str = "processed_messages.json"):
+    BUG FIX: this used to be an unbounded set() that grew forever — every
+    message ever processed stayed in the file permanently, and _save()
+    rewrote the ENTIRE file on every single new message (O(n) per write,
+    O(n^2) over the life of a long-running worker). Deduping only needs to
+    remember recently-seen messages, not the full history, so this now keeps
+    an ordered, capped window (default 2000) and evicts the oldest entries
+    once it's full — bounded memory, bounded file size, bounded write cost.
+    """
+
+    MAX_ENTRIES = 2000
+
+    def __init__(self, path: str = "processed_messages.json", max_entries: int = MAX_ENTRIES):
         self.path = Path(path)
-        self._cache = self._load()
+        self.max_entries = max_entries
+        self._order: list[str] = self._load()   # oldest first
+        self._set: set[str] = set(self._order)
 
-    def _load(self) -> set[str]:
+    def _load(self) -> list[str]:
         if not self.path.exists():
-            return set()
+            return []
         try:
             with open(self.path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            return set(data.get("processed", []))
+            items = data.get("processed", [])
+            # Keep only the most recent max_entries even if an old,
+            # larger file is loaded once after upgrading.
+            return list(dict.fromkeys(items))[-self.max_entries:]
         except (json.JSONDecodeError, OSError):
-            return set()
+            return []
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.path, "w", encoding="utf-8") as f:
-            json.dump({"processed": sorted(self._cache)}, f)
+            json.dump({"processed": self._order}, f)
 
     def should_process(self, message_id: str) -> bool:
         if not message_id:
             return False
-        if message_id in self._cache:
+        if message_id in self._set:
             return False
-        self._cache.add(message_id)
+        self._order.append(message_id)
+        self._set.add(message_id)
+        if len(self._order) > self.max_entries:
+            oldest = self._order.pop(0)
+            self._set.discard(oldest)
         self._save()
         return True
 

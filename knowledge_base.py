@@ -150,37 +150,47 @@ class UserKnowledgeBase:
         return {category: [dict(item) for item in items] for category, items in self._memory.items()}
 
     def build_profile_summary(self) -> str:
-        """Generate a compact user profile summary from saved memory, using the model when possible."""
+        """Generate a compact user profile summary from saved memory, using the model when possible.
+
+        BUG FIX: this used to hardcode GEMINI_API_KEY directly, so Claude and
+        Groq users never got a condensed summary at all — only the raw bullet
+        list. It also called _resolve_gemini_model(), which makes up to 5 live
+        API calls with no caching on every single invocation. Routing through
+        llm_provider.LLMProvider fixes both: it works with whichever provider
+        is actually configured, and never needs to probe model names at all.
+        """
         facts = self.get_facts()
         if not facts:
             return "No remembered user facts yet."
 
         summary_text = "\n".join(f"- {item['fact']}" for item in facts[:20])
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
+
+        from llm_provider import LLMProvider
+        provider = LLMProvider()
+        if not provider.is_configured:
             return summary_text
 
-        model_name = self._resolve_gemini_model()
-        if not model_name:
-            return summary_text
-
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-        prompt = (
-            "Condense the following notes into a brief, natural, long-term user profile summary. "
-            "Keep it compact, useful, and human-readable.\n\n"
-            f"Notes:\n{summary_text}"
-        )
         try:
-            response = __import__("requests").post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=30)
-            if response.status_code != 200:
-                return summary_text
-            data = response.json()
-            for candidate in data.get("candidates", []):
-                for part in candidate.get("content", {}).get("parts", []):
-                    if isinstance(part, dict) and "text" in part:
-                        text = str(part["text"]).strip()
-                        if text:
-                            return text
+            result = provider.create_message(
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        "Condense the following notes into a brief, natural, long-term "
+                        "user profile summary. Keep it compact, useful, and human-readable.\n\n"
+                        f"Notes:\n{summary_text}"
+                    ),
+                }],
+                anthropic_tools=[],
+                system="You write concise, natural user-profile summaries from a list of remembered facts.",
+                max_tokens=300,
+            )
+            text = (result.get("text") or "").strip()
+            # Same error-leak guard as email_agent.py's fix: llm_provider
+            # reports failures as a normal result whose text is an error
+            # string, rather than raising.
+            is_error_text = text.startswith(f"{provider.display_name} error:")
+            if text and not is_error_text:
+                return text
         except Exception:
             pass
         return summary_text
