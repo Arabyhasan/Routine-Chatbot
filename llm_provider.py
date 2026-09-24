@@ -140,7 +140,7 @@ class LLMProvider:
     """
 
     # Models to use per provider
-    GROQ_MODEL    = os.getenv("GROQ_MODEL",   "llama-3.3-70b-versatile")
+    GROQ_MODEL    = os.getenv("GROQ_MODEL",   "openai/gpt-oss-120b")
     GEMINI_MODEL  = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
     CLAUDE_MODEL  = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
     CLAUDE_FALLBACK = os.getenv("CLAUDE_FALLBACK_MODEL", "claude-3-5-haiku-latest")
@@ -152,7 +152,7 @@ class LLMProvider:
         if os.getenv("ANTHROPIC_API_KEY"):
             return "anthropic", f"Claude ({self.CLAUDE_MODEL})"
         if os.getenv("GROQ_API_KEY"):
-            return "groq",      f"Llama 3.3 70B via Groq (free)"
+            return "groq",      f"GPT-OSS 120B via Groq (free)"
         if os.getenv("GEMINI_API_KEY"):
             return "gemini",    f"Gemini 2.0 Flash via Google (free)"
         return "none", "No provider configured"
