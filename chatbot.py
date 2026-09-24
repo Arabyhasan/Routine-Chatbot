@@ -419,10 +419,13 @@ class RoutineChatbot:
 
                 messages.append({"role": "user", "content": tool_results})
                 self.history.append({"role": "user", "content": tool_results})
+                self._last_tool_text = "\n".join(str(r["content"]) for r in tool_results)
                 continue
 
             break
 
+        if getattr(self, "_last_tool_text", None):
+            return f"{self._last_tool_text}\n\n(I had trouble wrapping that up neatly — let me know if you need anything else.)"
         return "I ran into an issue processing that. Please try again."
 
     def clear_history(self):

@@ -20,3 +20,5 @@ dist/
 *.spec
 
 .slack_mcp_tokens.json
+
+RoutineAgent.exe
