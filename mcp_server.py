@@ -29,7 +29,18 @@ mcp = MCPServer("routine-agent")
 
 
 def _ctx() -> ToolContext:
-    """Build a ToolContext for each MCP call (stateless — no persistent connection)."""
+    """Build a ToolContext for each MCP call (stateless — no persistent connection).
+
+    routine_path and knowledge_path can be overridden via environment
+    variables — this is how web_app.py spawns one mcp_server.py subprocess
+    per logged-in profile, each pointed at that profile's own routine.json
+    and knowledge_store.json, without needing any other code change here.
+    Google's own env-var fallbacks (GOOGLE_CALENDAR_TOKEN_PATH etc., already
+    read by GoogleIntegration itself) work the same way.
+    """
+    routine_path = os.getenv("ROUTINE_AGENT_ROUTINE_PATH", "routine.json")
+    knowledge_path = os.getenv("ROUTINE_AGENT_KNOWLEDGE_PATH", "knowledge_store.json")
+
     svc = ServiceConfig.from_env()
     slack = None
     google = None
@@ -48,12 +59,12 @@ def _ctx() -> ToolContext:
     knowledge_base = None
     try:
         from knowledge_base import UserKnowledgeBase
-        knowledge_base = UserKnowledgeBase("knowledge_store.json")
+        knowledge_base = UserKnowledgeBase(knowledge_path)
     except Exception:
         pass
     return ToolContext(
         config=Config("config.yaml"),
-        routine_path="routine.json",
+        routine_path=routine_path,
         slack=slack,
         google=google,
         knowledge_base=knowledge_base,

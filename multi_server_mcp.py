@@ -37,6 +37,7 @@ class StdioServer:
     command: str
     args: list[str]
     label: str = "local"
+    env: Optional[dict] = None  # extra/override environment variables for the subprocess
 
 
 @dataclass
@@ -66,7 +67,7 @@ class MultiServerMCP:
         self._stack = contextlib.AsyncExitStack()
         for spec in self._server_specs:
             if isinstance(spec, StdioServer):
-                params = StdioServerParameters(command=spec.command, args=spec.args)
+                params = StdioServerParameters(command=spec.command, args=spec.args, env=spec.env)
                 client = await self._stack.enter_async_context(Client(stdio_client(params)))
             elif isinstance(spec, RemoteServer):
                 transport = streamable_http_client(spec.url, http_client=spec.http_client)

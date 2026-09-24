@@ -5,10 +5,10 @@ import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Optional
 
 import account_manager
-from chatbot import RoutineChatbot
-from service_config import ServiceConfig
+from mcp_agent_session import AgentSession
 
 HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -511,6 +511,7 @@ HTML = """<!DOCTYPE html>
 # ─── Session (single active profile at a time — this is a local desktop app) ──
 
 session = {"username": None, "vault": None, "password": None}
+agent_session: Optional[AgentSession] = None
 
 
 def _profile_paths(username: str) -> dict:
@@ -536,21 +537,30 @@ def _materialize_vault_to_disk(username: str, vault: account_manager.Vault) -> d
     return paths
 
 
-def _build_bot(mode: str) -> RoutineChatbot:
-    mode_map = {
-        "slack_gmail_calendar": ServiceConfig(enabled_services=["slack","gmail","calendar"], slack_enabled=True,  gmail_enabled=True,  calendar_enabled=True),
-        "slack_gmail":          ServiceConfig(enabled_services=["slack","gmail"],            slack_enabled=True,  gmail_enabled=True,  calendar_enabled=False),
-        "gmail":                ServiceConfig(enabled_services=["gmail"],                    slack_enabled=False, gmail_enabled=True,  calendar_enabled=False),
-        "slack":                ServiceConfig(enabled_services=["slack"],                    slack_enabled=True,  gmail_enabled=False, calendar_enabled=False),
-        "calendar":             ServiceConfig(enabled_services=["calendar"],                 slack_enabled=False, gmail_enabled=False, calendar_enabled=True),
-    }
-    routine_path = "routine.json"
-    if session["username"]:
-        routine_path = _profile_paths(session["username"])["routine"]
-    return RoutineChatbot(service_config=mode_map.get(mode, mode_map["slack_gmail_calendar"]), routine_path=routine_path)
+MODE_FLAGS = {
+    "slack_gmail_calendar": {"ENABLE_SLACK": "true",  "ENABLE_GMAIL": "true",  "ENABLE_CALENDAR": "true"},
+    "slack_gmail":          {"ENABLE_SLACK": "true",  "ENABLE_GMAIL": "true",  "ENABLE_CALENDAR": "false"},
+    "gmail":                {"ENABLE_SLACK": "false", "ENABLE_GMAIL": "true",  "ENABLE_CALENDAR": "false"},
+    "slack":                {"ENABLE_SLACK": "true",  "ENABLE_GMAIL": "false", "ENABLE_CALENDAR": "false"},
+    "calendar":             {"ENABLE_SLACK": "false", "ENABLE_GMAIL": "false", "ENABLE_CALENDAR": "true"},
+}
 
 
-bot: RoutineChatbot | None = None  # built once someone is logged in
+def _start_session_for(username: str, mode: str = "slack_gmail_calendar") -> AgentSession:
+    """Build and start a real AgentSession (spawns mcp_server.py, connects
+    Slack's official server if this profile has it), scoped to one profile's
+    own routine/knowledge/token files."""
+    paths = _profile_paths(username)
+    vault = session["vault"]
+    s = AgentSession(
+        routine_path=paths["routine"],
+        google_token_path=paths["google_token"] if (vault and vault.google_token) else paths["google_token"],
+        knowledge_path=str(account_manager.profile_dir(username) / "knowledge_store.json"),
+        slack_token_path=str(paths["slack_token"]) if (vault and vault.slack_token) else None,
+        service_env=MODE_FLAGS.get(mode, MODE_FLAGS["slack_gmail_calendar"]),
+    )
+    s.start()
+    return s
 
 
 class ChatHandler(BaseHTTPRequestHandler):
@@ -589,16 +599,13 @@ class ChatHandler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/api/status":
-            global bot
-            if bot is None:
-                self._send_json(200, {"claude": "missing", "slack": "missing", "gmail": "missing", "calendar": "missing", "sheets": "missing"})
-                return
+            vault = session.get("vault")
             self._send_json(200, {
-                "claude":    "ok"      if os.getenv("ANTHROPIC_API_KEY") or os.getenv("GROQ_API_KEY") or os.getenv("GEMINI_API_KEY") else "missing",
-                "slack":     "ready"   if (bot.service_config.slack_enabled    and bot.slack    and bot.slack.bot_token)        else "missing",
-                "gmail":     "ready"   if (bot.service_config.gmail_enabled    and bot.google   and bot.google.creds is not None) else "missing",
-                "calendar":  "ready"   if (bot.service_config.calendar_enabled and bot.google   and bot.google.creds is not None) else "missing",
-                "sheets":    "ready"   if (bot.google and bot.google.creds is not None) else "missing",
+                "claude":    "ok"    if os.getenv("ANTHROPIC_API_KEY") or os.getenv("GROQ_API_KEY") or os.getenv("GEMINI_API_KEY") else "missing",
+                "slack":     "ready" if (vault and vault.slack_token) else "missing",
+                "gmail":     "ready" if (vault and vault.google_token) else "missing",
+                "calendar":  "ready" if (vault and vault.google_token) else "missing",
+                "sheets":    "ready" if (vault and vault.google_token) else "missing",
             })
             return
 
@@ -615,7 +622,7 @@ class ChatHandler(BaseHTTPRequestHandler):
         self.send_response(404); self.end_headers()
 
     def do_POST(self):
-        global bot
+        global agent_session
         payload = self._read_json()
 
         # ── Auth ──────────────────────────────────────────────
@@ -630,7 +637,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"ok": False, "error": str(exc)})
                 return
             session["username"], session["vault"], session["password"] = username, vault, password
-            bot = _build_bot("slack_gmail_calendar")
+            agent_session = _start_session_for(username)
             self._send_json(200, {"ok": True, "google_connected": False, "slack_connected": False})
             return
 
@@ -642,7 +649,8 @@ class ChatHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"ok": False, "error": str(exc)})
                 return
             session["username"], session["vault"], session["password"] = username, vault, password
-            bot = _build_bot("slack_gmail_calendar")
+            _materialize_vault_to_disk(username, vault)
+            agent_session = _start_session_for(username)
             self._send_json(200, {
                 "ok": True,
                 "google_connected": bool(vault.google_token),
@@ -651,6 +659,8 @@ class ChatHandler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/api/logout":
+            if agent_session:
+                agent_session.stop()
             # Remove the transient plaintext token copies — only the encrypted
             # vault should survive between sessions.
             if session["username"]:
@@ -661,7 +671,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                     except Exception:
                         pass
             session["username"], session["vault"], session["password"] = None, None, None
-            bot = None
+            agent_session = None
             self._send_json(200, {"ok": True})
             return
 
@@ -679,10 +689,12 @@ class ChatHandler(BaseHTTPRequestHandler):
                 token_json = Path(paths["google_token"]).read_text()
                 session["vault"].google_token = token_json
                 account_manager.save_vault(session["username"], session["password"], session["vault"])
+                # No restart needed: mcp_server.py re-reads the token file fresh
+                # on every tool call, and it was already pointed at this exact
+                # path when the session started.
             except Exception as exc:
                 self._send_json(200, {"ok": False, "error": str(exc)})
                 return
-            bot = _build_bot("slack_gmail_calendar")
             self._send_json(200, {"ok": True})
             return
 
@@ -703,6 +715,12 @@ class ChatHandler(BaseHTTPRequestHandler):
                 if paths["slack_token"].exists():
                     session["vault"].slack_token = paths["slack_token"].read_text()
                     account_manager.save_vault(session["username"], session["password"], session["vault"])
+                # Unlike Google, Slack's remote connection is established once
+                # at session start — restart so the now-saved token actually
+                # gets used to open the Slack MCP connection this time.
+                if agent_session:
+                    agent_session.stop()
+                agent_session = _start_session_for(session["username"])
             except Exception as exc:
                 self._send_json(200, {"ok": False, "error": str(exc)})
                 return
@@ -710,33 +728,36 @@ class ChatHandler(BaseHTTPRequestHandler):
             return
 
         # ── Chat (requires an active session) ───────────────────
-        if not session["username"] or bot is None:
+        if not session["username"] or agent_session is None:
             self._send_json(401, {"error": "Not signed in."})
             return
 
         if self.path == "/api/config":
             mode = str(payload.get("mode", "slack_gmail_calendar"))
-            bot = _build_bot(mode)
+            agent_session.stop()
+            agent_session = _start_session_for(session["username"], mode=mode)
             self._send_json(200, {"reply": f"Service mode updated to {mode}."})
             return
 
         if self.path == "/api/clear":
-            bot.clear_history()
+            agent_session.clear_history()
             self._send_json(200, {"ok": True})
             return
 
         if self.path == "/api/chat":
             msg = str(payload.get("message", "")).strip()
-            reply = bot.respond(msg) if msg else "Please enter a message."
+            try:
+                reply = agent_session.chat(msg) if msg else "Please enter a message."
+            except Exception as exc:
+                reply = f"Something went wrong reaching the agent: {exc}"
             self._send_json(200, {"reply": reply})
             return
 
         if self.path == "/api/sheet-sync":
-            if bot.google and bot.google.creds:
+            vault = session.get("vault")
+            if vault and vault.google_token:
                 try:
-                    si = bot.google.get_sheets_integration()
-                    url = si.sync(bot.tool_ctx.routine_path)
-                    bot.tool_ctx.sheets_url = url
+                    url = agent_session.sync_sheets()
                     self._send_json(200, {"url": url})
                 except Exception as exc:
                     self._send_json(200, {"error": str(exc)})
