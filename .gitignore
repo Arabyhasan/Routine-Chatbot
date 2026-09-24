@@ -13,3 +13,8 @@ processed_messages.json
 *.pem
 *.key
 .DS_Store
+-e 
+# PyInstaller
+build/
+dist/
+*.spec

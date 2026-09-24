@@ -376,9 +376,18 @@ class ChatHandler(BaseHTTPRequestHandler):
 
 
 def main():
+    import threading
+    import webbrowser
+
     server = ThreadingHTTPServer(("0.0.0.0", 8000), ChatHandler)
     print("Routine Agent → http://localhost:8000")
     print("Press Ctrl+C to stop.")
+
+    # Auto-open the browser shortly after the server starts listening.
+    # Needed once the exe is built with --windowed (no console to read
+    # the URL from), and harmless for normal `python web_app.py` runs.
+    threading.Timer(1.0, lambda: webbrowser.open("http://localhost:8000")).start()
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:

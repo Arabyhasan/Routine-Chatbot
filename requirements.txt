@@ -18,3 +18,7 @@ mcp[cli]>=2.0,<3.0
 
 # Dev
 pytest
+
+# Packaging (Windows .exe build only — not needed to run the app)
+pyinstaller
+pillow
