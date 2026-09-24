@@ -771,12 +771,36 @@ class ChatHandler(BaseHTTPRequestHandler):
         pass  # suppress access logs
 
 
+def _make_console_utf8_safe() -> None:
+    """
+    BUG FIX: Windows' console defaults to cp1252, which can't encode
+    characters like the arrow used below — this crashed with
+    UnicodeEncodeError the moment main() tried to print it. Reconfiguring
+    stdout/stderr to UTF-8 (with errors='replace' as a last resort, never
+    a crash) fixes this for any text, not just the one line that happened
+    to trigger it first.
+
+    Guarded because sys.stdout can be None or a non-reconfigurable object
+    when running as a --windowed PyInstaller build with no console at all
+    — in that case there's nothing to fix and nothing to crash either.
+    """
+    import sys
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
 def main():
     import threading
     import webbrowser
 
+    _make_console_utf8_safe()
+
     server = ThreadingHTTPServer(("0.0.0.0", 8000), ChatHandler)
-    print("Routine Agent → http://localhost:8000")
+    print("Routine Agent -> http://localhost:8000")
     print("Press Ctrl+C to stop.")
 
     threading.Timer(1.0, lambda: webbrowser.open("http://localhost:8000")).start()

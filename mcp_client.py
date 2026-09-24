@@ -51,11 +51,11 @@ async def _build_server_list(server_script_path: str) -> list:
             http_client = await build_slack_http_client()
             if http_client:
                 servers.append(RemoteServer(url=SLACK_MCP_URL, http_client=http_client, label="slack"))
-                print("Slack MCP server connected — Slack's own tools are now available.")
+                print("Slack MCP server connected -- Slack's own tools are now available.")
             else:
-                print("Slack MCP setup did not complete — continuing without it.")
+                print("Slack MCP setup did not complete -- continuing without it.")
         except Exception as exc:
-            print(f"Could not connect Slack's MCP server ({exc}) — continuing without it.")
+            print(f"Could not connect Slack's MCP server ({exc}) -- continuing without it.")
 
     return servers
 
@@ -101,7 +101,7 @@ class MCPClient:
 
     async def connect(self, multi: MultiServerMCP) -> None:
         self.tools = await multi.list_tools()
-        print("\nConnected — tools available:", [t["name"] for t in self.tools])
+        print("\nConnected -- tools available:", [t["name"] for t in self.tools])
 
     # ─── Agent loop (mirrors chatbot.py's RoutineAgent.respond) ───────────
 
@@ -180,6 +180,15 @@ class MCPClient:
 
 
 async def main() -> None:
+    # Same Windows cp1252 console fix as web_app.py — see that file's
+    # _make_console_utf8_safe() for the full explanation.
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
     default_server = str(Path(__file__).resolve().parent / "mcp_server.py")
     server_script_path = sys.argv[1] if len(sys.argv) > 1 else default_server
 
