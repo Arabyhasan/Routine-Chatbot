@@ -142,16 +142,19 @@ async def _wait_for_callback() -> _CallbackResult:
 
 # ─── Building the OAuth-aware httpx client for streamable_http_client() ────
 
-async def build_slack_http_client() -> Optional["httpx2.AsyncClient"]:
+async def build_slack_http_client(token_path: Optional[Path] = None) -> Optional["httpx2.AsyncClient"]:
     """
     Runs (or resumes) the Slack MCP OAuth flow and returns an httpx2.AsyncClient
     pre-configured with valid Slack credentials, ready to pass into
     streamable_http_client(SLACK_MCP_URL, http_client=this).
 
+    token_path lets each user profile keep its own saved Slack token instead
+    of sharing the single default file — pass profiles/<username>/slack_token.json.
+
     Returns None if the user's browser flow fails or is cancelled — callers
     should treat that as "Slack tools unavailable this session", not a crash.
     """
-    storage = FileTokenStorage()
+    storage = FileTokenStorage(path=token_path) if token_path else FileTokenStorage()
 
     async def redirect_handler(url: str) -> None:
         webbrowser.open(url)

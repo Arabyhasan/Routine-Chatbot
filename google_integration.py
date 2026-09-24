@@ -25,9 +25,9 @@ SCOPES = [
 class GoogleIntegration:
     """Real Google API wrapper with credential bootstrap logic."""
 
-    def __init__(self):
-        self.credentials_path = os.getenv("GOOGLE_CALENDAR_CREDENTIALS_PATH", "credentials.json")
-        self.token_path = os.getenv("GOOGLE_CALENDAR_TOKEN_PATH", "token.json")
+    def __init__(self, credentials_path: str | None = None, token_path: str | None = None):
+        self.credentials_path = credentials_path or os.getenv("GOOGLE_CALENDAR_CREDENTIALS_PATH", "credentials.json")
+        self.token_path = token_path or os.getenv("GOOGLE_CALENDAR_TOKEN_PATH", "token.json")
         self.creds = self._load_credentials()
 
     def _load_credentials(self):

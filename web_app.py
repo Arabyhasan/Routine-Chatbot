@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
+import account_manager
 from chatbot import RoutineChatbot
 from service_config import ServiceConfig
 
@@ -115,14 +119,110 @@ HTML = """<!DOCTYPE html>
             white-space: nowrap; padding: 8px 4px;
         }
         .sheet-link:hover { text-decoration: underline; }
+        .logout-btn {
+            border: 1px solid var(--border); background: transparent;
+            color: var(--muted); border-radius: 8px; padding: 6px 10px;
+            font-size: .78rem; cursor: pointer;
+        }
+        .logout-btn:hover { color: var(--text); border-color: var(--muted); }
+
+        /* ── Auth gate ─────────────────────────────────────────── */
+        .authcard {
+            width: min(420px,92vw); background: rgba(15,23,42,0.92);
+            border: 1px solid var(--border); border-radius: 18px;
+            padding: 32px 28px; box-shadow: 0 25px 60px rgba(0,0,0,0.45);
+        }
+        .authcard h1 { font-size: 1.3rem; margin-bottom: 6px; }
+        .authcard .sub { color: var(--muted); font-size: .88rem; margin-bottom: 22px; }
+        .authcard label { display: block; font-size: .8rem; color: var(--muted); margin: 14px 0 6px; }
+        .authcard input {
+            width: 100%; background: var(--panel-soft); border: 1px solid var(--border);
+            color: var(--text); border-radius: 10px; padding: 11px 13px; font-size: .93rem;
+        }
+        .authcard input:focus { outline: none; border-color: var(--accent); }
+        .authbtn {
+            width: 100%; margin-top: 20px; border: none; border-radius: 10px;
+            padding: 12px; background: linear-gradient(135deg,var(--accent),var(--accent-strong));
+            color: white; font-weight: 700; cursor: pointer; font-size: .95rem;
+        }
+        .authbtn:disabled { opacity: .55; cursor: default; }
+        .authswitch { text-align: center; margin-top: 16px; font-size: .85rem; color: var(--muted); }
+        .authswitch a { color: var(--accent); cursor: pointer; text-decoration: none; }
+        .autherr { color: #fca5a5; font-size: .82rem; margin-top: 10px; min-height: 1.2em; }
+        .profile-pick { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
+        .profile-chip {
+            border: 1px solid var(--border); background: var(--panel-soft); color: var(--text);
+            border-radius: 20px; padding: 7px 14px; font-size: .85rem; cursor: pointer;
+        }
+        .profile-chip.active { border-color: var(--accent); color: var(--accent); }
+
+        /* ── Onboarding (post-login, pre-chat) ─────────────────── */
+        .onb-step { display: flex; flex-direction: column; gap: 10px; margin-top: 18px; }
+        .onb-row {
+            display: flex; align-items: center; justify-content: space-between;
+            border: 1px solid var(--border); border-radius: 12px; padding: 13px 15px;
+            background: var(--panel-soft);
+        }
+        .onb-row .label { font-size: .9rem; }
+        .onb-row .sub { font-size: .76rem; color: var(--muted); }
+        .onb-btn {
+            border: 1px solid var(--border); background: rgba(56,189,248,.12);
+            color: var(--accent); border-radius: 8px; padding: 8px 14px;
+            font-size: .82rem; font-weight: 600; cursor: pointer; white-space: nowrap;
+        }
+        .onb-btn.done { background: rgba(34,197,94,.12); color: var(--success); border-color: rgba(34,197,94,.4); cursor: default; }
+        .onb-btn.skip { background: transparent; color: var(--muted); }
+        .onb-continue { margin-top: 18px; }
     </style>
 </head>
 <body>
-<div class="shell">
+
+<!-- ═══════════════ AUTH GATE (login / signup) ═══════════════ -->
+<div class="authcard" id="authGate">
+    <h1 id="authTitle">Welcome back</h1>
+    <div class="sub" id="authSub">Sign in to your Routine Agent profile.</div>
+
+    <div class="profile-pick" id="profilePick"></div>
+
+    <label for="authUser">Name</label>
+    <input id="authUser" type="text" autocomplete="username" placeholder="e.g. araby" />
+    <label for="authPass">Password</label>
+    <input id="authPass" type="password" autocomplete="current-password" placeholder="••••••••" />
+
+    <button class="authbtn" id="authSubmit">Sign in</button>
+    <div class="autherr" id="authErr"></div>
+    <div class="authswitch" id="authSwitch">New here? <a id="toSignup">Create a profile</a></div>
+</div>
+
+<!-- ═══════════════ ONBOARDING (connect Google/Slack) ═══════════════ -->
+<div class="authcard" id="onboardGate" style="display:none;">
+    <h1>Almost there</h1>
+    <div class="sub">Connect the accounts Routine Agent should act on. You can skip any of these and connect them later.</div>
+    <div class="onb-step">
+        <div class="onb-row">
+            <div><div class="label">Google</div><div class="sub">Gmail, Calendar, Sheets</div></div>
+            <button class="onb-btn" id="connectGoogleBtn">Connect</button>
+        </div>
+        <div class="onb-row">
+            <div><div class="label">Slack</div><div class="sub">Official Slack MCP server</div></div>
+            <button class="onb-btn" id="connectSlackBtn">Connect</button>
+        </div>
+        <div class="onb-row">
+            <div><div class="label">Routine sheet</div><div class="sub">Auto-created or resumed on your Google Drive once connected</div></div>
+            <span class="sub">Automatic</span>
+        </div>
+    </div>
+    <button class="authbtn onb-continue" id="onboardContinue">Continue to chat</button>
+</div>
+
+<!-- ═══════════════ MAIN CHAT SHELL ═══════════════ -->
+<div class="shell" id="chatShell" style="display:none;">
     <div class="header">
         <span class="header-title">Routine Agent</span>
         <span class="badge">Claude AI</span>
+        <span id="whoAmI" style="margin-left:12px;font-size:.8rem;color:var(--muted)"></span>
         <span id="apiStatus" style="margin-left:auto;font-size:.8rem;color:var(--muted)"></span>
+        <button class="logout-btn" id="logoutBtn" style="margin-left:10px;">Sign out</button>
     </div>
     <div class="toolbar">
         <label for="serviceSelect">Mode:</label>
@@ -148,12 +248,124 @@ HTML = """<!DOCTYPE html>
 </div>
 
 <script>
+    // ─── Auth gate ──────────────────────────────────────────────
+    const authGate    = document.getElementById('authGate');
+    const onboardGate = document.getElementById('onboardGate');
+    const chatShell   = document.getElementById('chatShell');
+    const authTitle   = document.getElementById('authTitle');
+    const authSub     = document.getElementById('authSub');
+    const authUser    = document.getElementById('authUser');
+    const authPass    = document.getElementById('authPass');
+    const authSubmit  = document.getElementById('authSubmit');
+    const authErr     = document.getElementById('authErr');
+    const authSwitch  = document.getElementById('authSwitch');
+    const toSignup    = document.getElementById('toSignup');
+    const profilePick = document.getElementById('profilePick');
+    let mode = 'login'; // or 'signup'
+
+    function setMode(next) {
+        mode = next;
+        authErr.textContent = '';
+        if (mode === 'signup') {
+            authTitle.textContent = 'Create your profile';
+            authSub.textContent = 'Pick a name and a password — this password only protects your saved logins on this device.';
+            authSubmit.textContent = 'Create profile';
+            authPass.autocomplete = 'new-password';
+            authSwitch.innerHTML = 'Already have a profile? <a id="toLogin">Sign in</a>';
+            document.getElementById('toLogin').addEventListener('click', () => setMode('login'));
+        } else {
+            authTitle.textContent = 'Welcome back';
+            authSub.textContent = 'Sign in to your Routine Agent profile.';
+            authSubmit.textContent = 'Sign in';
+            authPass.autocomplete = 'current-password';
+            authSwitch.innerHTML = 'New here? <a id="toSignup">Create a profile</a>';
+            document.getElementById('toSignup').addEventListener('click', () => setMode('signup'));
+        }
+    }
+    toSignup.addEventListener('click', () => setMode('signup'));
+
+    async function loadProfiles() {
+        try {
+            const res = await fetch('/api/profiles');
+            const data = await res.json();
+            profilePick.innerHTML = '';
+            (data.profiles || []).forEach(name => {
+                const chip = document.createElement('div');
+                chip.className = 'profile-chip';
+                chip.textContent = name;
+                chip.onclick = () => { authUser.value = name; authPass.focus(); };
+                profilePick.appendChild(chip);
+            });
+        } catch {}
+    }
+
+    authSubmit.addEventListener('click', async () => {
+        const username = authUser.value.trim();
+        const password = authPass.value;
+        if (!username || !password) { authErr.textContent = 'Enter a name and password.'; return; }
+        authSubmit.disabled = true;
+        authErr.textContent = '';
+        try {
+            const res = await fetch(mode === 'signup' ? '/api/signup' : '/api/login', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({username, password})
+            });
+            const data = await res.json();
+            if (!data.ok) { authErr.textContent = data.error || 'Something went wrong.'; authSubmit.disabled = false; return; }
+            authGate.style.display = 'none';
+            enterOnboarding(data);
+        } catch {
+            authErr.textContent = 'Could not reach the app. Is it still running?';
+            authSubmit.disabled = false;
+        }
+    });
+    authPass.addEventListener('keydown', e => { if (e.key === 'Enter') authSubmit.click(); });
+
+    // ─── Onboarding ─────────────────────────────────────────────
+    function enterOnboarding(status) {
+        onboardGate.style.display = 'block';
+        if (status.google_connected) markDone('connectGoogleBtn');
+        if (status.slack_connected)  markDone('connectSlackBtn');
+    }
+    function markDone(id) {
+        const btn = document.getElementById(id);
+        btn.textContent = 'Connected ✓';
+        btn.classList.add('done');
+        btn.disabled = true;
+    }
+    async function connectService(endpoint, btnId) {
+        const btn = document.getElementById(btnId);
+        btn.textContent = 'Opening browser…';
+        btn.disabled = true;
+        try {
+            const res = await fetch(endpoint, {method: 'POST'});
+            const data = await res.json();
+            if (data.ok) { markDone(btnId); }
+            else { btn.textContent = 'Retry'; btn.disabled = false; alert(data.error || 'Connection failed.'); }
+        } catch {
+            btn.textContent = 'Retry'; btn.disabled = false;
+            alert('Could not reach the app.');
+        }
+    }
+    document.getElementById('connectGoogleBtn').addEventListener('click',
+        () => connectService('/api/connect-google', 'connectGoogleBtn'));
+    document.getElementById('connectSlackBtn').addEventListener('click',
+        () => connectService('/api/connect-slack', 'connectSlackBtn'));
+    document.getElementById('onboardContinue').addEventListener('click', () => {
+        onboardGate.style.display = 'none';
+        chatShell.style.display = 'flex';
+        enterChat();
+    });
+
+    // ─── Chat (unchanged behaviour, now gated behind login) ───────
     const messages  = document.getElementById('messages');
     const input     = document.getElementById('messageInput');
     const sendBtn   = document.getElementById('sendButton');
     const clearBtn  = document.getElementById('clearButton');
     const svcSelect = document.getElementById('serviceSelect');
     const apiStatus = document.getElementById('apiStatus');
+    const whoAmI    = document.getElementById('whoAmI');
+    const logoutBtn = document.getElementById('logoutBtn');
 
     function addMessage(text, sender, thinking = false) {
         const row  = document.createElement('div');
@@ -164,7 +376,7 @@ HTML = """<!DOCTYPE html>
         row.appendChild(bbl);
         messages.appendChild(row);
         messages.scrollTop = messages.scrollHeight;
-        return bbl;  // return so we can update it
+        return bbl;
     }
 
     async function sendMessage() {
@@ -173,13 +385,10 @@ HTML = """<!DOCTYPE html>
         addMessage(text, 'user');
         input.value = '';
         sendBtn.disabled = true;
-
         const thinkBbl = addMessage('Thinking…', 'bot', true);
-
         try {
             const res  = await fetch('/api/chat', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+                method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({message: text})
             });
             const data = await res.json();
@@ -201,15 +410,14 @@ HTML = """<!DOCTYPE html>
     }
 
     async function updateMode() {
-        const mode = svcSelect.value;
+        const svcmode = svcSelect.value;
         try {
             const res  = await fetch('/api/config', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({mode})
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({mode: svcmode})
             });
             const data = await res.json();
-            addMessage(data.reply || `Mode changed to ${mode}.`, 'bot');
+            addMessage(data.reply || `Mode changed to ${svcmode}.`, 'bot');
         } catch {}
     }
 
@@ -250,28 +458,82 @@ HTML = """<!DOCTYPE html>
         btn.textContent = '📊 Sync Sheet';
         btn.disabled = false;
     }
-
     document.getElementById('sheetSyncBtn').addEventListener('click', syncSheet);
 
-    // Restore sheet link if available from previous sync
+    logoutBtn.addEventListener('click', async () => {
+        try { await fetch('/api/logout', {method: 'POST'}); } catch {}
+        location.reload();
+    });
+
+    function enterChat() {
+        (async () => {
+            try {
+                const res = await fetch('/api/sheet-url');
+                const data = await res.json();
+                if (data.url) {
+                    const link = document.getElementById('sheetLink');
+                    link.href = data.url;
+                    link.style.display = 'inline';
+                }
+            } catch {}
+        })();
+        (async () => {
+            try {
+                const res = await fetch('/api/whoami');
+                const data = await res.json();
+                whoAmI.textContent = data.username ? ('· ' + data.username) : '';
+            } catch {}
+        })();
+        addMessage('Hi! I can help with your schedule, meetings, Slack messages, and emails. What can I do for you?', 'bot');
+        input.focus();
+        checkStatus();
+    }
+
+    // ─── Boot: check if a session is already active (e.g. page refresh) ──
     (async () => {
         try {
-            const res = await fetch('/api/sheet-url');
+            const res = await fetch('/api/whoami');
             const data = await res.json();
-            if (data.url) {
-                const link = document.getElementById('sheetLink');
-                link.href = data.url;
-                link.style.display = 'inline';
+            if (data.username) {
+                chatShell.style.display = 'flex';
+                enterChat();
+                return;
             }
         } catch {}
+        loadProfiles();
+        setMode('login');
     })();
-
-    addMessage('Hi! I can help with your schedule, meetings, Slack messages, and emails. What can I do for you?', 'bot');
-    input.focus();
-    checkStatus();
 </script>
 </body>
 </html>"""
+
+
+# ─── Session (single active profile at a time — this is a local desktop app) ──
+
+session = {"username": None, "vault": None, "password": None}
+
+
+def _profile_paths(username: str) -> dict:
+    d = account_manager.profile_dir(username)
+    d.mkdir(parents=True, exist_ok=True)
+    return {
+        "routine": str(d / "routine.json"),
+        "google_token": str(d / "token.json"),
+        "slack_token": d / "slack_token.json",
+    }
+
+
+def _materialize_vault_to_disk(username: str, vault: account_manager.Vault) -> dict:
+    """Write out this profile's saved tokens as plaintext files, only for the
+    duration of this session, so google_integration.py / slack_mcp_auth.py can
+    keep working exactly as they already do. The encrypted vault stays the
+    source of truth; these are just a transient working copy."""
+    paths = _profile_paths(username)
+    if vault.google_token:
+        Path(paths["google_token"]).write_text(vault.google_token)
+    if vault.slack_token:
+        paths["slack_token"].write_text(vault.slack_token)
+    return paths
 
 
 def _build_bot(mode: str) -> RoutineChatbot:
@@ -282,10 +544,13 @@ def _build_bot(mode: str) -> RoutineChatbot:
         "slack":                ServiceConfig(enabled_services=["slack"],                    slack_enabled=True,  gmail_enabled=False, calendar_enabled=False),
         "calendar":             ServiceConfig(enabled_services=["calendar"],                 slack_enabled=False, gmail_enabled=False, calendar_enabled=True),
     }
-    return RoutineChatbot(service_config=mode_map.get(mode, mode_map["slack_gmail_calendar"]))
+    routine_path = "routine.json"
+    if session["username"]:
+        routine_path = _profile_paths(session["username"])["routine"]
+    return RoutineChatbot(service_config=mode_map.get(mode, mode_map["slack_gmail_calendar"]), routine_path=routine_path)
 
 
-bot = _build_bot("slack_gmail_calendar")
+bot: RoutineChatbot | None = None  # built once someone is logged in
 
 
 class ChatHandler(BaseHTTPRequestHandler):
@@ -297,8 +562,15 @@ class ChatHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _read_json(self) -> dict:
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length)
+        try:
+            return json.loads(raw.decode())
+        except Exception:
+            return {}
+
     def do_GET(self):
-        global bot
         if self.path in ("/", "/index.html"):
             body = HTML.encode("utf-8")
             self.send_response(200)
@@ -308,10 +580,21 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
+        if self.path == "/api/profiles":
+            self._send_json(200, {"profiles": account_manager.list_profiles()})
+            return
+
+        if self.path == "/api/whoami":
+            self._send_json(200, {"username": session["username"]})
+            return
+
         if self.path == "/api/status":
-            import os
+            global bot
+            if bot is None:
+                self._send_json(200, {"claude": "missing", "slack": "missing", "gmail": "missing", "calendar": "missing", "sheets": "missing"})
+                return
             self._send_json(200, {
-                "claude":    "ok"      if os.getenv("ANTHROPIC_API_KEY") else "missing",
+                "claude":    "ok"      if os.getenv("ANTHROPIC_API_KEY") or os.getenv("GROQ_API_KEY") or os.getenv("GEMINI_API_KEY") else "missing",
                 "slack":     "ready"   if (bot.service_config.slack_enabled    and bot.slack    and bot.slack.bot_token)        else "missing",
                 "gmail":     "ready"   if (bot.service_config.gmail_enabled    and bot.google   and bot.google.creds is not None) else "missing",
                 "calendar":  "ready"   if (bot.service_config.calendar_enabled and bot.google   and bot.google.creds is not None) else "missing",
@@ -322,9 +605,8 @@ class ChatHandler(BaseHTTPRequestHandler):
         if self.path == "/api/sheet-url":
             try:
                 from sheets_integration import STATE_FILE
-                import json as _json
                 with open(STATE_FILE) as f:
-                    state = _json.load(f)
+                    state = json.load(f)
                 self._send_json(200, {"url": state.get("sheet_url", "")})
             except Exception:
                 self._send_json(200, {"url": ""})
@@ -334,10 +616,103 @@ class ChatHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         global bot
-        length  = int(self.headers.get("Content-Length", 0))
-        raw     = self.rfile.read(length)
-        try:    payload = json.loads(raw.decode())
-        except: payload = {}
+        payload = self._read_json()
+
+        # ── Auth ──────────────────────────────────────────────
+        if self.path == "/api/signup":
+            username, password = str(payload.get("username", "")).strip(), str(payload.get("password", ""))
+            try:
+                vault = account_manager.create_profile(username, password)
+            except account_manager.ProfileAlreadyExists:
+                self._send_json(200, {"ok": False, "error": "That name is already taken. Try signing in instead."})
+                return
+            except ValueError as exc:
+                self._send_json(200, {"ok": False, "error": str(exc)})
+                return
+            session["username"], session["vault"], session["password"] = username, vault, password
+            bot = _build_bot("slack_gmail_calendar")
+            self._send_json(200, {"ok": True, "google_connected": False, "slack_connected": False})
+            return
+
+        if self.path == "/api/login":
+            username, password = str(payload.get("username", "")).strip(), str(payload.get("password", ""))
+            try:
+                vault = account_manager.login(username, password)
+            except account_manager.InvalidCredentials as exc:
+                self._send_json(200, {"ok": False, "error": str(exc)})
+                return
+            session["username"], session["vault"], session["password"] = username, vault, password
+            bot = _build_bot("slack_gmail_calendar")
+            self._send_json(200, {
+                "ok": True,
+                "google_connected": bool(vault.google_token),
+                "slack_connected": bool(vault.slack_token),
+            })
+            return
+
+        if self.path == "/api/logout":
+            # Remove the transient plaintext token copies — only the encrypted
+            # vault should survive between sessions.
+            if session["username"]:
+                paths = _profile_paths(session["username"])
+                for p in (paths["google_token"], paths["slack_token"]):
+                    try:
+                        Path(p).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+            session["username"], session["vault"], session["password"] = None, None, None
+            bot = None
+            self._send_json(200, {"ok": True})
+            return
+
+        if self.path == "/api/connect-google":
+            if not session["username"]:
+                self._send_json(200, {"ok": False, "error": "Not signed in."})
+                return
+            paths = _profile_paths(session["username"])
+            try:
+                from google_integration import GoogleIntegration
+                gi = GoogleIntegration(credentials_path="credentials.json", token_path=paths["google_token"])
+                if gi.creds is None:
+                    self._send_json(200, {"ok": False, "error": "credentials.json not found. Add it to the app folder first (see Google Cloud setup steps)."})
+                    return
+                token_json = Path(paths["google_token"]).read_text()
+                session["vault"].google_token = token_json
+                account_manager.save_vault(session["username"], session["password"], session["vault"])
+            except Exception as exc:
+                self._send_json(200, {"ok": False, "error": str(exc)})
+                return
+            bot = _build_bot("slack_gmail_calendar")
+            self._send_json(200, {"ok": True})
+            return
+
+        if self.path == "/api/connect-slack":
+            if not session["username"]:
+                self._send_json(200, {"ok": False, "error": "Not signed in."})
+                return
+            if os.getenv("ENABLE_SLACK_MCP", "").lower() not in ("1", "true", "yes"):
+                self._send_json(200, {"ok": False, "error": "Slack MCP is not enabled. Set ENABLE_SLACK_MCP=true in .env first."})
+                return
+            paths = _profile_paths(session["username"])
+            try:
+                from slack_mcp_auth import build_slack_http_client
+                http_client = asyncio.run(build_slack_http_client(token_path=paths["slack_token"]))
+                if not http_client:
+                    self._send_json(200, {"ok": False, "error": "Slack connection was cancelled or failed."})
+                    return
+                if paths["slack_token"].exists():
+                    session["vault"].slack_token = paths["slack_token"].read_text()
+                    account_manager.save_vault(session["username"], session["password"], session["vault"])
+            except Exception as exc:
+                self._send_json(200, {"ok": False, "error": str(exc)})
+                return
+            self._send_json(200, {"ok": True})
+            return
+
+        # ── Chat (requires an active session) ───────────────────
+        if not session["username"] or bot is None:
+            self._send_json(401, {"error": "Not signed in."})
+            return
 
         if self.path == "/api/config":
             mode = str(payload.get("mode", "slack_gmail_calendar"))
@@ -366,7 +741,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 except Exception as exc:
                     self._send_json(200, {"error": str(exc)})
             else:
-                self._send_json(200, {"error": "Google not connected — add credentials.json and run: python google_integration.py"})
+                self._send_json(200, {"error": "Google not connected — connect it from the onboarding step."})
             return
 
         self.send_response(404); self.end_headers()
@@ -383,9 +758,6 @@ def main():
     print("Routine Agent → http://localhost:8000")
     print("Press Ctrl+C to stop.")
 
-    # Auto-open the browser shortly after the server starts listening.
-    # Needed once the exe is built with --windowed (no console to read
-    # the URL from), and harmless for normal `python web_app.py` runs.
     threading.Timer(1.0, lambda: webbrowser.open("http://localhost:8000")).start()
 
     try:
