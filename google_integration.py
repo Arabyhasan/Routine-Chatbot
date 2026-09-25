@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from env_loader import load_project_env
@@ -41,6 +42,7 @@ class GoogleIntegration:
             elif os.path.exists(self.credentials_path):
                 flow = InstalledAppFlow.from_client_secrets_file(self.credentials_path, SCOPES)
                 creds = flow.run_local_server(port=0)
+                Path(self.token_path).parent.mkdir(parents=True, exist_ok=True)
                 with open(self.token_path, "w", encoding="utf-8") as token:
                     token.write(creds.to_json())
             else:
