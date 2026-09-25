@@ -61,6 +61,13 @@ class Config:
             "relationship": "unknown",
         }
 
+    # ── Raw requesters access (avoids re-reading the file elsewhere) ───────
+
+    def get_all_requesters(self) -> Dict[str, Any]:
+        """Return the raw requesters config dict, already loaded — callers
+        should use this instead of re-opening config.yaml themselves."""
+        return self._raw.get("requesters", {})
+
     # ── Commitment config ──────────────────────────────────────────────────
 
     def get_commitment_config(self, commitment_type: str) -> Dict[str, Any]:

@@ -456,11 +456,14 @@ def tool_recall_memory(ctx: ToolContext, inp: dict) -> str:
 
 def tool_get_configured_requesters(ctx: ToolContext, inp: dict) -> str:
     try:
-        import yaml
-        config_path = getattr(ctx.config, "_path", "config.yaml")
-        with open(config_path, encoding="utf-8") as f:
-            raw = yaml.safe_load(f)
-        requesters = raw.get("requesters", {})
+        # BUG FIX: this used to re-open config.yaml itself via
+        # getattr(ctx.config, "_path", "config.yaml") — but Config has no
+        # _path attribute at all, so this always fell back to the bare
+        # "config.yaml" string and failed once the process's working
+        # directory could no longer be assumed to be the extension's own
+        # folder. ctx.config already has this data loaded correctly
+        # (via its own proper path-resolution fallback) — just use it.
+        requesters = ctx.config.get_all_requesters()
         lines = []
         for key, data in requesters.items():
             if key == "default_unknown":
