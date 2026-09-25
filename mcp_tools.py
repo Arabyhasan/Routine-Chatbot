@@ -476,8 +476,14 @@ def tool_get_configured_requesters(ctx: ToolContext, inp: dict) -> str:
 
 
 def tool_health_check(ctx: ToolContext, inp: dict) -> str:
+    # BUG FIX: this used to check os.getenv('ANTHROPIC_API_KEY') only, same
+    # hardcoding pattern already found and fixed in email_agent.py and
+    # knowledge_base.py — anyone running on the free Groq/Gemini tier this
+    # project recommends would see "MISSING" despite everything working.
+    from llm_provider import LLMProvider
+    provider = LLMProvider()
     parts = [
-        f"Claude API: {'configured' if os.getenv('ANTHROPIC_API_KEY') else 'MISSING'}",
+        f"LLM provider: {provider.display_name if provider.is_configured else 'MISSING'}",
         f"Slack: {'ready' if (ctx.slack and getattr(ctx.slack, 'bot_token', None)) else 'not configured'}",
         f"Gmail: {'ready' if (ctx.google and getattr(ctx.google, 'creds', None)) else 'not configured'}",
         f"Routine: {len(load_routine(ctx.routine_path))} commitment(s)",
