@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from typing import Any, Dict, List
 
 from llm_provider import LLMProvider
@@ -64,8 +65,16 @@ class EmailAgent:
                 # those failure sites, so no guessing is needed.
                 if text and not result.get("is_error"):
                     return text
-            except Exception:
-                pass
+                elif result.get("is_error"):
+                    print(f"[email_agent] LLM returned an error, falling back to template: {text}", file=sys.stderr)
+                else:
+                    print(f"[email_agent] LLM returned empty text (stop_reason={result.get('stop_reason')}), falling back to template", file=sys.stderr)
+            except Exception as exc:
+                # BUG FIX: this used to be `except Exception: pass` — a real
+                # failure here was completely invisible, indistinguishable
+                # from "no provider configured". Logging to stderr surfaces
+                # it in Claude Desktop's MCP server log instead.
+                print(f"[email_agent] draft_email LLM call raised: {exc!r}", file=sys.stderr)
 
         # Template fallback — only reached if no provider is configured at
         # all, or the live call genuinely failed (not just "wrong provider").

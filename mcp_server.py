@@ -41,12 +41,18 @@ def _ctx() -> ToolContext:
     """
     routine_path = os.getenv("ROUTINE_AGENT_ROUTINE_PATH", "routine.json")
     knowledge_path = os.getenv("ROUTINE_AGENT_KNOWLEDGE_PATH", "knowledge_store.json")
+    # BUG FIX: confirm_pending_email could never work before this — see the
+    # comment on ToolContext.pending_email_path in mcp_tools.py for why.
+    pending_email_path = os.getenv(
+        "ROUTINE_AGENT_PENDING_EMAIL_PATH",
+        str(Path(routine_path).parent / "pending_email.json"),
+    )
 
     # These paths now point outside the extension's own install directory
     # (so reinstalling/updating the extension doesn't wipe user data), which
     # means the target folder may not exist yet on first run. Create it if
     # needed, rather than failing the first write with "path not found".
-    for p in (routine_path, knowledge_path):
+    for p in (routine_path, knowledge_path, pending_email_path):
         parent = Path(p).parent
         if parent and str(parent) not in (".", ""):
             parent.mkdir(parents=True, exist_ok=True)
@@ -72,6 +78,7 @@ def _ctx() -> ToolContext:
         knowledge_base = UserKnowledgeBase(knowledge_path)
     except Exception:
         pass
+    from mcp_tools import _load_pending_email
     return ToolContext(
         config=Config("config.yaml"),
         routine_path=routine_path,
@@ -79,6 +86,8 @@ def _ctx() -> ToolContext:
         google=google,
         knowledge_base=knowledge_base,
         service_config=svc,
+        pending_email=_load_pending_email(pending_email_path),
+        pending_email_path=pending_email_path,
     )
 
 

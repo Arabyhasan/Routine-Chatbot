@@ -121,6 +121,16 @@ class ToolContext:
     service_config: Any = None
     pending_email: Optional[dict] = None   # email draft awaiting user confirmation
     sheets_url: Optional[str] = None         # last synced sheet URL (set by _auto_sync_sheets)
+    pending_email_path: Optional[str] = None
+    # ^ BUG FIX: chatbot.py keeps one persistent ToolContext for a whole chat
+    # session, so in-memory pending_email works fine there. mcp_server.py
+    # rebuilds a fresh ToolContext on every single tool call (by design,
+    # for statelessness) — meaning a draft set by send_email was always
+    # discarded before confirm_pending_email's separate call could ever see
+    # it, and confirmation could never actually work. When this path is set,
+    # pending_email is also persisted to/loaded from that file so it survives
+    # between calls; when left None (chatbot.py's case), behavior is
+    # unchanged — pure in-memory, no file involved.
 
 
 # ─── Tool implementations ─────────────────────────────────────────────────────
@@ -377,6 +387,30 @@ def tool_send_slack_message(ctx: ToolContext, inp: dict) -> str:
         return f"Slack error: {exc}"
 
 
+def _save_pending_email(ctx: ToolContext) -> None:
+    """Persist ctx.pending_email to disk if a path is configured (mcp_server.py's case)."""
+    if not ctx.pending_email_path:
+        return
+    try:
+        with open(ctx.pending_email_path, "w", encoding="utf-8") as f:
+            if ctx.pending_email:
+                json.dump(ctx.pending_email, f)
+            else:
+                f.write("")
+    except OSError:
+        pass  # best-effort — worst case the confirmation step just won't find it
+
+
+def _load_pending_email(path: str) -> Optional[dict]:
+    """Load a persisted pending_email, if any, for a freshly-built ToolContext."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = f.read().strip()
+        return json.loads(raw) if raw else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def tool_send_email(ctx: ToolContext, inp: dict) -> str:
     """Draft an email; set send_now=True only if user explicitly said to send."""
     to_email = inp.get("to_email", "")
@@ -397,11 +431,13 @@ def tool_send_email(ctx: ToolContext, inp: dict) -> str:
         "subject": subject,
         "draft": draft,
     }
+    _save_pending_email(ctx)
 
     if send_now and ctx.google and getattr(ctx.google, "creds", None):
         try:
             ctx.google.send_email(to_email, subject, draft)
             ctx.pending_email = None
+            _save_pending_email(ctx)
             return f"Email sent to {to_email}.\n\nSubject: {subject}\n\n{draft}"
         except Exception as exc:
             return f"Draft ready but send failed: {exc}\n\nDraft:\nSubject: {subject}\n\n{draft}"
@@ -415,11 +451,18 @@ def tool_send_email(ctx: ToolContext, inp: dict) -> str:
 
 def tool_confirm_pending_email(ctx: ToolContext, inp: dict) -> str:
     confirm = (inp.get("confirm") or "").strip().lower()
+    # BUG FIX: mcp_server.py builds a fresh ToolContext per call, so the
+    # in-memory ctx.pending_email set by send_email is always gone by the
+    # time this runs — load it back from disk if a persistence path was
+    # configured (see _save_pending_email/ToolContext.pending_email_path).
+    if not ctx.pending_email and ctx.pending_email_path:
+        ctx.pending_email = _load_pending_email(ctx.pending_email_path)
     if not ctx.pending_email:
         return "No pending email draft to confirm."
     if confirm in ("yes", "send", "send it", "confirm", "approve"):
         pending = ctx.pending_email
         ctx.pending_email = None
+        _save_pending_email(ctx)
         if ctx.google and getattr(ctx.google, "creds", None):
             try:
                 ctx.google.send_email(pending["to_email"], pending["subject"], pending["draft"])
@@ -428,6 +471,7 @@ def tool_confirm_pending_email(ctx: ToolContext, inp: dict) -> str:
                 return f"Send failed: {exc}"
         return f"Gmail not connected. Here's the draft to copy:\n\n{pending['draft']}"
     ctx.pending_email = None
+    _save_pending_email(ctx)
     return "Email cancelled."
 
 
