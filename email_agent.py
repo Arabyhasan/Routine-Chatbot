@@ -53,11 +53,16 @@ class EmailAgent:
                 )
                 text = (result.get("text") or "").strip()
                 # llm_provider.create_message() reports failures as a normal
-                # "end_turn" result whose text is an error string, rather than
-                # raising — without this check, a live API failure would be
-                # shown to the user as if it were the actual email draft.
-                is_error_text = text.startswith(f"{self.provider.display_name} error:")
-                if text and not is_error_text:
+                # "end_turn" result rather than raising — without this check,
+                # a live API failure would be shown as if it were the actual
+                # email draft. BUG FIX: this used to check text.startswith(...)
+                # against one specific error-message shape, but llm_provider.py
+                # actually has 5 different failure message formats (missing
+                # package, not configured, two different API-error prefixes),
+                # only one of which matched — the others leaked raw errors to
+                # the user. is_error is an explicit flag set at every one of
+                # those failure sites, so no guessing is needed.
+                if text and not result.get("is_error"):
                     return text
             except Exception:
                 pass

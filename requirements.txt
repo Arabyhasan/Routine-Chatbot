@@ -24,3 +24,7 @@ pyinstaller
 pillow
 
 cryptography
+
+# Used by routine_lock.py to detect and clear stale locks left behind by
+# crashed/killed processes (e.g. Claude Desktop restarting the MCP server)
+psutil

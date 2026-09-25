@@ -112,12 +112,16 @@ def _anthropic_history_to_openai(history: list, system_prompt: str) -> list:
 
 # ─── Normalised response ─────────────────────────────────────────────────────
 
-def _norm(stop_reason: str, text: str | None, tool_calls: list, raw=None) -> dict:
+def _norm(stop_reason: str, text: str | None, tool_calls: list, raw=None, is_error: bool = False) -> dict:
     return {
         "stop_reason": stop_reason,   # "end_turn" | "tool_use"
         "text":        text,
         "tool_calls":  tool_calls,    # [{"id":..., "name":..., "input":{...}}]
         "_raw":        raw,           # Anthropic raw content blocks (or None)
+        "is_error":    is_error,      # explicit flag — callers should check this,
+                                       # not guess from text prefixes (there are
+                                       # several different error message shapes
+                                       # below, not all of which share a prefix)
     }
 
 
@@ -199,7 +203,7 @@ class LLMProvider:
                 api_key=os.getenv("GEMINI_API_KEY", ""),
                 model=self.GEMINI_MODEL,
             )
-        return _norm("end_turn", self.not_configured_message(), [])
+        return _norm("end_turn", self.not_configured_message(), [], is_error=True)
 
     # ── Anthropic ─────────────────────────────────────────────────────────────
 
@@ -207,7 +211,7 @@ class LLMProvider:
         try:
             import anthropic
         except ImportError:
-            return _norm("end_turn", "anthropic package not installed. Run: pip install anthropic", [])
+            return _norm("end_turn", "anthropic package not installed. Run: pip install anthropic", [], is_error=True)
 
         client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
         model  = self.CLAUDE_MODEL
@@ -226,7 +230,7 @@ class LLMProvider:
                 if attempt == 0 and "model" in str(exc).lower() and model != self.CLAUDE_FALLBACK:
                     model = self.CLAUDE_FALLBACK
                     continue
-                return _norm("end_turn", f"Claude API error: {exc}", [])
+                return _norm("end_turn", f"Claude API error: {exc}", [], is_error=True)
 
         tool_calls, text = [], None
         for block in resp.content:
@@ -245,7 +249,7 @@ class LLMProvider:
         try:
             from openai import OpenAI
         except ImportError:
-            return _norm("end_turn", "openai package not installed. Run: pip install openai", [])
+            return _norm("end_turn", "openai package not installed. Run: pip install openai", [], is_error=True)
 
         client       = OpenAI(base_url=base_url, api_key=api_key)
         oai_tools    = _anthropic_tools_to_openai(anthropic_tools)
@@ -260,7 +264,7 @@ class LLMProvider:
                 tool_choice="auto",
             )
         except Exception as exc:
-            return _norm("end_turn", f"{self.display_name} error: {exc}", [])
+            return _norm("end_turn", f"{self.display_name} error: {exc}", [], is_error=True)
 
         choice  = resp.choices[0]
         message = choice.message

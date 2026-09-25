@@ -185,11 +185,14 @@ class UserKnowledgeBase:
                 max_tokens=300,
             )
             text = (result.get("text") or "").strip()
-            # Same error-leak guard as email_agent.py's fix: llm_provider
-            # reports failures as a normal result whose text is an error
-            # string, rather than raising.
-            is_error_text = text.startswith(f"{provider.display_name} error:")
-            if text and not is_error_text:
+            # BUG FIX: this used to check text.startswith(f"{provider.display_name} error:"),
+            # which only matches ONE of the 5 different failure-message shapes
+            # llm_provider.py can actually produce (e.g. the Claude-specific
+            # retry path uses a hardcoded "Claude API error:" prefix that
+            # doesn't match display_name at all) — confirmed live when a
+            # real 401 error leaked straight through to the user via
+            # recall_memory. is_error is now an explicit flag, no guessing.
+            if text and not result.get("is_error"):
                 return text
         except Exception:
             pass
