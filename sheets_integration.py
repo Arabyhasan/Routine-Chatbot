@@ -3,7 +3,7 @@ sheets_integration.py — Google Sheets weekly schedule view.
 
 Creates and maintains one spreadsheet:
   - Columns: Mon–Sun with real dates (next 7 days from Monday of current week)
-  - Rows: 8:00 AM → 10:00 PM in 30-min steps
+  - Rows: 10:00 AM → 10:00 PM in 2-hour steps
   - Cells: commitment name OR "Free"
   - Colors: green (free) | orange (reschedulable) | red (fixed/locked)
 
@@ -81,12 +81,16 @@ class SheetsIntegration:
         parent = Path(self.state_path).parent
         if parent and str(parent) not in (".", ""):
             parent.mkdir(parents=True, exist_ok=True)
+
         with open(self.state_path, "w", encoding="utf-8") as f:
             json.dump(
-                {"spreadsheet_id": spreadsheet_id,
-                 "week_start": week_start.isoformat(),
-                 "sheet_url": url},
-                f, indent=2
+                {
+                    "spreadsheet_id": spreadsheet_id,
+                    "week_start": week_start.isoformat(),
+                    "sheet_url": url,
+                },
+                f,
+                indent=2,
             )
 
     def get_sheet_url(self) -> Optional[str]:
@@ -97,6 +101,7 @@ class SheetsIntegration:
     def _find_existing(self) -> Optional[str]:
         """Return spreadsheet ID if the sheet already exists in Drive."""
         state = self._load_state()
+
         if state.get("spreadsheet_id"):
             # Verify it still exists
             try:
@@ -115,25 +120,41 @@ class SheetsIntegration:
                 fields="files(id,name)",
                 pageSize=1,
             ).execute()
+
             files = results.get("files", [])
+
             if files:
                 return files[0]["id"]
+
         except Exception:
             pass
+
         return None
 
     def _create_spreadsheet(self) -> str:
         """Create a fresh spreadsheet and return its ID."""
-        ss = self.sheets.spreadsheets().create(body={
-            "properties": {"title": SHEET_TITLE},
-            "sheets": [{"properties": {"title": "Schedule", "sheetId": 0}}],
-        }).execute()
+        ss = self.sheets.spreadsheets().create(
+            body={
+                "properties": {"title": SHEET_TITLE},
+                "sheets": [
+                    {
+                        "properties": {
+                            "title": "Schedule",
+                            "sheetId": 0,
+                        }
+                    }
+                ],
+            }
+        ).execute()
+
         return ss["spreadsheetId"]
 
     def _get_or_create(self) -> str:
         sid = self._find_existing()
+
         if not sid:
             sid = self._create_spreadsheet()
+
         return sid
 
     # ── Grid helpers ──────────────────────────────────────────────────────────
@@ -146,22 +167,48 @@ class SheetsIntegration:
     @staticmethod
     def _time_slots() -> List[time]:
         slots: List[time] = []
-        cursor = datetime.combine(date.today(), WORK_START)
-        end    = datetime.combine(date.today(), WORK_END)
-        while cursor <= end:
+
+        cursor = datetime.combine(
+            date.today(),
+            WORK_START,
+        )
+
+        end = datetime.combine(
+            date.today(),
+            WORK_END,
+        )
+
+        # FIX: use < rather than <= so 22:00 is not generated
+        # as an additional slot that spills into the next day.
+        while cursor < end:
             slots.append(cursor.time())
             cursor += timedelta(minutes=STEP_MINUTES)
+
         return slots
 
     @staticmethod
-    def _cell_for(slot_start: time, d: date, commitments: List[Commitment]) -> tuple[str, Optional[Commitment]]:
+    def _cell_for(
+        slot_start: time,
+        d: date,
+        commitments: List[Commitment],
+    ) -> tuple[str, Optional[Commitment]]:
         """Return (cell_text, matching_commitment_or_None) for a slot."""
-        day_enum  = DayOfWeek(d.strftime("%A").lower())
-        end_dt    = datetime.combine(d, slot_start) + timedelta(minutes=STEP_MINUTES)
-        slot      = TimeSlot(start=slot_start, end=end_dt.time())
+        day_enum = DayOfWeek(d.strftime("%A").lower())
+
+        end_dt = datetime.combine(
+            d,
+            slot_start,
+        ) + timedelta(minutes=STEP_MINUTES)
+
+        slot = TimeSlot(
+            start=slot_start,
+            end=end_dt.time(),
+        )
+
         for c in commitments:
             if day_enum in c.days and slot.overlaps(c.time_slot):
                 return c.title, c
+
         return "Free", None
 
     # ── Main sync ─────────────────────────────────────────────────────────────
@@ -172,23 +219,53 @@ class SheetsIntegration:
         Safe to call after every mutation — only formats cells that changed.
         Returns the sheet URL.
         """
-        commitments  = load_routine(routine_path)
-        week_start   = self._week_start()
-        dates        = [week_start + timedelta(days=i) for i in range(7)]
-        time_slots   = self._time_slots()
-        today        = date.today()
+        commitments = load_routine(routine_path)
+
+        week_start = self._week_start()
+
+        dates = [
+            week_start + timedelta(days=i)
+            for i in range(7)
+        ]
+
+        time_slots = self._time_slots()
+        today = date.today()
 
         sid = self._get_or_create()
         url = f"https://docs.google.com/spreadsheets/d/{sid}"
 
+        # FIX: Clear the entire previous schedule first.
+        # This removes stale rows left behind when the schedule
+        # shrinks from the old 30-minute grid to the new 2-hour grid.
+        self.sheets.spreadsheets().values().clear(
+            spreadsheetId=sid,
+            range="Schedule!A1:Z1000",
+        ).execute()
+
         # ── 1. Build value grid ───────────────────────────────────────────────
-        header = ["Time"] + [d.strftime("%a\n%d %b") for d in dates]
-        rows   = [header]
+
+        header = [
+            "Time"
+        ] + [
+            d.strftime("%a\n%d %b")
+            for d in dates
+        ]
+
+        rows = [header]
+
         for s in time_slots:
-            row = [s.strftime("%I:%M %p")]
+            row = [
+                s.strftime("%I:%M %p")
+            ]
+
             for d in dates:
-                text, _ = self._cell_for(s, d, commitments)
+                text, _ = self._cell_for(
+                    s,
+                    d,
+                    commitments,
+                )
                 row.append(text)
+
             rows.append(row)
 
         self.sheets.spreadsheets().values().update(
@@ -199,113 +276,262 @@ class SheetsIntegration:
         ).execute()
 
         # ── 2. Formatting ─────────────────────────────────────────────────────
+
         reqs: list = []
+
         n_rows = len(time_slots)
         n_cols = 8   # A + 7 days
 
         # Freeze header row and Time column
-        reqs.append({"updateSheetProperties": {
-            "properties": {"sheetId": 0, "gridProperties": {"frozenRowCount": 1, "frozenColumnCount": 1}},
-            "fields": "gridProperties.frozenRowCount,gridProperties.frozenColumnCount",
-        }})
+        reqs.append(
+            {
+                "updateSheetProperties": {
+                    "properties": {
+                        "sheetId": 0,
+                        "gridProperties": {
+                            "frozenRowCount": 1,
+                            "frozenColumnCount": 1,
+                        },
+                    },
+                    "fields": (
+                        "gridProperties.frozenRowCount,"
+                        "gridProperties.frozenColumnCount"
+                    ),
+                }
+            }
+        )
 
         # Header row
-        reqs.append({"repeatCell": {
-            "range": {"sheetId": 0, "startRowIndex": 0, "endRowIndex": 1,
-                      "startColumnIndex": 0, "endColumnIndex": n_cols},
-            "cell": {"userEnteredFormat": {
-                "backgroundColor": C_HEADER_BG,
-                "textFormat": {"foregroundColor": C_HEADER_FG, "bold": True, "fontSize": 10},
-                "horizontalAlignment": "CENTER",
-                "verticalAlignment": "MIDDLE",
-                "wrapStrategy": "WRAP",
-            }},
-            "fields": "userEnteredFormat",
-        }})
+        reqs.append(
+            {
+                "repeatCell": {
+                    "range": {
+                        "sheetId": 0,
+                        "startRowIndex": 0,
+                        "endRowIndex": 1,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": n_cols,
+                    },
+                    "cell": {
+                        "userEnteredFormat": {
+                            "backgroundColor": C_HEADER_BG,
+                            "textFormat": {
+                                "foregroundColor": C_HEADER_FG,
+                                "bold": True,
+                                "fontSize": 10,
+                            },
+                            "horizontalAlignment": "CENTER",
+                            "verticalAlignment": "MIDDLE",
+                            "wrapStrategy": "WRAP",
+                        }
+                    },
+                    "fields": "userEnteredFormat",
+                }
+            }
+        )
 
-        # Today column highlight (override header bg for that column)
+        # Today column highlight
         for col_idx, d in enumerate(dates):
             if d == today:
-                reqs.append({"repeatCell": {
-                    "range": {"sheetId": 0, "startRowIndex": 0, "endRowIndex": 1,
-                              "startColumnIndex": col_idx + 1, "endColumnIndex": col_idx + 2},
-                    "cell": {"userEnteredFormat": {
-                        "backgroundColor": C_TODAY_BG,
-                        "textFormat": {"foregroundColor": C_HEADER_FG, "bold": True, "fontSize": 10},
-                        "horizontalAlignment": "CENTER",
-                        "verticalAlignment": "MIDDLE",
-                        "wrapStrategy": "WRAP",
-                    }},
-                    "fields": "userEnteredFormat",
-                }})
+                reqs.append(
+                    {
+                        "repeatCell": {
+                            "range": {
+                                "sheetId": 0,
+                                "startRowIndex": 0,
+                                "endRowIndex": 1,
+                                "startColumnIndex": col_idx + 1,
+                                "endColumnIndex": col_idx + 2,
+                            },
+                            "cell": {
+                                "userEnteredFormat": {
+                                    "backgroundColor": C_TODAY_BG,
+                                    "textFormat": {
+                                        "foregroundColor": C_HEADER_FG,
+                                        "bold": True,
+                                        "fontSize": 10,
+                                    },
+                                    "horizontalAlignment": "CENTER",
+                                    "verticalAlignment": "MIDDLE",
+                                    "wrapStrategy": "WRAP",
+                                }
+                            },
+                            "fields": "userEnteredFormat",
+                        }
+                    }
+                )
 
         # Time column (A)
-        reqs.append({"repeatCell": {
-            "range": {"sheetId": 0, "startRowIndex": 1, "endRowIndex": n_rows + 1,
-                      "startColumnIndex": 0, "endColumnIndex": 1},
-            "cell": {"userEnteredFormat": {
-                "backgroundColor": C_TIME_COL,
-                "textFormat": {"bold": True},
-                "horizontalAlignment": "CENTER",
-                "verticalAlignment": "MIDDLE",
-            }},
-            "fields": "userEnteredFormat",
-        }})
+        reqs.append(
+            {
+                "repeatCell": {
+                    "range": {
+                        "sheetId": 0,
+                        "startRowIndex": 1,
+                        "endRowIndex": n_rows + 1,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": 1,
+                    },
+                    "cell": {
+                        "userEnteredFormat": {
+                            "backgroundColor": C_TIME_COL,
+                            "textFormat": {"bold": True},
+                            "horizontalAlignment": "CENTER",
+                            "verticalAlignment": "MIDDLE",
+                        }
+                    },
+                    "fields": "userEnteredFormat",
+                }
+            }
+        )
 
         # Data cells
         for row_idx, s in enumerate(time_slots):
             for col_idx, d in enumerate(dates):
-                _, commitment = self._cell_for(s, d, commitments)
+
+                _, commitment = self._cell_for(
+                    s,
+                    d,
+                    commitments,
+                )
+
                 if commitment is None:
                     bg = C_FREE
                 elif not commitment.reschedulable:
-                    bg = C_LOCKED    # red — fixed (class, locked work meeting)
+                    bg = C_LOCKED
                 else:
-                    bg = C_BUSY     # orange — moveable (gym, deep work, lunch)
+                    bg = C_BUSY
 
-                reqs.append({"repeatCell": {
-                    "range": {"sheetId": 0,
-                              "startRowIndex": row_idx + 1, "endRowIndex": row_idx + 2,
-                              "startColumnIndex": col_idx + 1, "endColumnIndex": col_idx + 2},
-                    "cell": {"userEnteredFormat": {
-                        "backgroundColor": bg,
-                        "horizontalAlignment": "CENTER",
-                        "verticalAlignment": "MIDDLE",
-                    }},
-                    "fields": "userEnteredFormat(backgroundColor,horizontalAlignment,verticalAlignment)",
-                }})
+                reqs.append(
+                    {
+                        "repeatCell": {
+                            "range": {
+                                "sheetId": 0,
+                                "startRowIndex": row_idx + 1,
+                                "endRowIndex": row_idx + 2,
+                                "startColumnIndex": col_idx + 1,
+                                "endColumnIndex": col_idx + 2,
+                            },
+                            "cell": {
+                                "userEnteredFormat": {
+                                    "backgroundColor": bg,
+                                    "horizontalAlignment": "CENTER",
+                                    "verticalAlignment": "MIDDLE",
+                                }
+                            },
+                            "fields": (
+                                "userEnteredFormat("
+                                "backgroundColor,"
+                                "horizontalAlignment,"
+                                "verticalAlignment"
+                                ")"
+                            ),
+                        }
+                    }
+                )
 
         # Column widths: A=90px, B-H=130px
-        reqs.append({"updateDimensionProperties": {
-            "range": {"sheetId": 0, "dimension": "COLUMNS", "startIndex": 0, "endIndex": 1},
-            "properties": {"pixelSize": 90}, "fields": "pixelSize",
-        }})
-        reqs.append({"updateDimensionProperties": {
-            "range": {"sheetId": 0, "dimension": "COLUMNS", "startIndex": 1, "endIndex": 8},
-            "properties": {"pixelSize": 130}, "fields": "pixelSize",
-        }})
+        reqs.append(
+            {
+                "updateDimensionProperties": {
+                    "range": {
+                        "sheetId": 0,
+                        "dimension": "COLUMNS",
+                        "startIndex": 0,
+                        "endIndex": 1,
+                    },
+                    "properties": {"pixelSize": 90},
+                    "fields": "pixelSize",
+                }
+            }
+        )
+
+        reqs.append(
+            {
+                "updateDimensionProperties": {
+                    "range": {
+                        "sheetId": 0,
+                        "dimension": "COLUMNS",
+                        "startIndex": 1,
+                        "endIndex": 8,
+                    },
+                    "properties": {"pixelSize": 130},
+                    "fields": "pixelSize",
+                }
+            }
+        )
 
         # Row heights: header=45px, data=25px
-        reqs.append({"updateDimensionProperties": {
-            "range": {"sheetId": 0, "dimension": "ROWS", "startIndex": 0, "endIndex": 1},
-            "properties": {"pixelSize": 45}, "fields": "pixelSize",
-        }})
-        reqs.append({"updateDimensionProperties": {
-            "range": {"sheetId": 0, "dimension": "ROWS", "startIndex": 1, "endIndex": n_rows + 1},
-            "properties": {"pixelSize": 25}, "fields": "pixelSize",
-        }})
+        reqs.append(
+            {
+                "updateDimensionProperties": {
+                    "range": {
+                        "sheetId": 0,
+                        "dimension": "ROWS",
+                        "startIndex": 0,
+                        "endIndex": 1,
+                    },
+                    "properties": {"pixelSize": 45},
+                    "fields": "pixelSize",
+                }
+            }
+        )
+
+        reqs.append(
+            {
+                "updateDimensionProperties": {
+                    "range": {
+                        "sheetId": 0,
+                        "dimension": "ROWS",
+                        "startIndex": 1,
+                        "endIndex": n_rows + 1,
+                    },
+                    "properties": {"pixelSize": 25},
+                    "fields": "pixelSize",
+                }
+            }
+        )
 
         # Border around entire table
-        reqs.append({"updateBorders": {
-            "range": {"sheetId": 0, "startRowIndex": 0, "endRowIndex": n_rows + 1,
-                      "startColumnIndex": 0, "endColumnIndex": n_cols},
-            "innerHorizontal": {"style": "SOLID", "color": {"red": 0.8, "green": 0.8, "blue": 0.8}},
-            "innerVertical":   {"style": "SOLID", "color": {"red": 0.8, "green": 0.8, "blue": 0.8}},
-        }})
+        reqs.append(
+            {
+                "updateBorders": {
+                    "range": {
+                        "sheetId": 0,
+                        "startRowIndex": 0,
+                        "endRowIndex": n_rows + 1,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": n_cols,
+                    },
+                    "innerHorizontal": {
+                        "style": "SOLID",
+                        "color": {
+                            "red": 0.8,
+                            "green": 0.8,
+                            "blue": 0.8,
+                        },
+                    },
+                    "innerVertical": {
+                        "style": "SOLID",
+                        "color": {
+                            "red": 0.8,
+                            "green": 0.8,
+                            "blue": 0.8,
+                        },
+                    },
+                }
+            }
+        )
 
         self.sheets.spreadsheets().batchUpdate(
-            spreadsheetId=sid, body={"requests": reqs}
+            spreadsheetId=sid,
+            body={"requests": reqs},
         ).execute()
 
-        self._save_state(sid, week_start, url)
+        self._save_state(
+            sid,
+            week_start,
+            url,
+        )
+
         return url
