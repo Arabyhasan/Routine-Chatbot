@@ -47,10 +47,14 @@ C_WHITE       = {"red": 1.00, "green": 1.00, "blue": 1.00}
 
 
 class SheetsIntegration:
-    def __init__(self, creds):
+    def __init__(self, creds, state_path: str | None = None):
         self.creds = creds
         self._sheets = None
         self._drive  = None
+        self.state_path = state_path or os.getenv(
+            "ROUTINE_AGENT_SHEET_STATE_PATH",
+            STATE_FILE,
+        )
 
     @property
     def sheets(self):
@@ -68,13 +72,16 @@ class SheetsIntegration:
 
     def _load_state(self) -> dict:
         try:
-            with open(STATE_FILE, encoding="utf-8") as f:
+            with open(self.state_path, encoding="utf-8") as f:
                 return json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             return {}
 
     def _save_state(self, spreadsheet_id: str, week_start: date, url: str):
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
+        parent = Path(self.state_path).parent
+        if parent and str(parent) not in (".", ""):
+            parent.mkdir(parents=True, exist_ok=True)
+        with open(self.state_path, "w", encoding="utf-8") as f:
             json.dump(
                 {"spreadsheet_id": spreadsheet_id,
                  "week_start": week_start.isoformat(),

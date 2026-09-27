@@ -72,7 +72,9 @@ class GoogleIntegration:
     def get_sheets_integration(self):
         """Return a ready SheetsIntegration instance (needs Sheets + Drive scopes)."""
         from sheets_integration import SheetsIntegration
-        return SheetsIntegration(self.creds)
+        default_state_path = str(Path(self.token_path).parent / "sheet_state.json")
+        state_path = os.getenv("ROUTINE_AGENT_SHEET_STATE_PATH", default_state_path)
+        return SheetsIntegration(self.creds, state_path=state_path)
 
     def list_upcoming_events(self, max_results: int = 10) -> List[Dict[str, Any]]:
         service = self.get_calendar_service()
