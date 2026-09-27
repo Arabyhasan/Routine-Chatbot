@@ -32,9 +32,15 @@ def parse_time_str(time_str: str):
     """Parse natural time strings → datetime.time. Returns None if unparseable."""
     s = (time_str or "").strip().lower()
     word_map = {
-        "morning": "09:00", "noon": "12:00", "afternoon": "14:00",
-        "evening": "18:00", "night": "20:00", "tonight": "20:00", "midnight": "00:00",
+        "morning": "09:00",
+        "noon": "12:00",
+        "afternoon": "14:00",
+        "evening": "18:00",
+        "night": "20:00",
+        "tonight": "20:00",
+        "midnight": "00:00",
     }
+
     for word, t in word_map.items():
         if word in s:
             return datetime.strptime(t, "%H:%M").time()
@@ -42,29 +48,43 @@ def parse_time_str(time_str: str):
     m = re.match(r"^(\d{1,2}):(\d{2})$", s)
     if m:
         try:
-            return datetime.strptime(f"{m.group(1)}:{m.group(2)}", "%H:%M").time()
+            return datetime.strptime(
+                f"{m.group(1)}:{m.group(2)}",
+                "%H:%M",
+            ).time()
         except ValueError:
             pass
 
     m = re.match(r"^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$", s)
     if m:
         h, mins = int(m.group(1)), int(m.group(2) or 0)
+
         if m.group(3) == "pm" and h != 12:
             h += 12
+
         if m.group(3) == "am" and h == 12:
             h = 0
+
         try:
-            return datetime.strptime(f"{h:02d}:{mins:02d}", "%H:%M").time()
+            return datetime.strptime(
+                f"{h:02d}:{mins:02d}",
+                "%H:%M",
+            ).time()
         except ValueError:
             pass
 
     m = re.match(r"^(\d{1,2})$", s)
     if m:
         h = int(m.group(1))
+
         if 1 <= h <= 6:
             h += 12  # 1–6 → PM
+
         try:
-            return datetime.strptime(f"{h:02d}:00", "%H:%M").time()
+            return datetime.strptime(
+                f"{h:02d}:00",
+                "%H:%M",
+            ).time()
         except ValueError:
             pass
 
@@ -75,32 +95,68 @@ def parse_day_str(day_str: str) -> date:
     """Parse 'today', 'tomorrow', 'monday', etc. → date."""
     s = (day_str or "today").strip().lower()
     today = date.today()
+
     if s in ("today", ""):
         return today
+
     if s == "tomorrow":
         return today + timedelta(days=1)
-    day_names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+
+    day_names = [
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+    ]
+
     if s in day_names:
         target = day_names.index(s)
         current = today.weekday()
         delta = (target - current) % 7 or 7
         return today + timedelta(days=delta)
+
     return today
 
 
 def expand_day_shortcuts(days: list) -> list:
     """Expand 'weekdays', 'everyday', 'weekend' shortcuts."""
     result = []
+
     for d in days:
         s = str(d).lower()
+
         if s in ("weekdays", "weekday", "every weekday"):
-            result += ["monday", "tuesday", "wednesday", "thursday", "friday"]
+            result += [
+                "monday",
+                "tuesday",
+                "wednesday",
+                "thursday",
+                "friday",
+            ]
+
         elif s in ("everyday", "every day", "daily"):
-            result += ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+            result += [
+                "monday",
+                "tuesday",
+                "wednesday",
+                "thursday",
+                "friday",
+                "saturday",
+                "sunday",
+            ]
+
         elif s in ("weekend", "weekends"):
-            result += ["saturday", "sunday"]
+            result += [
+                "saturday",
+                "sunday",
+            ]
+
         else:
             result.append(s)
+
     return result
 
 
@@ -119,10 +175,12 @@ class ToolContext:
     google: Any = None
     knowledge_base: Any = None
     service_config: Any = None
-    pending_email: Optional[dict] = None   # email draft awaiting user confirmation
-    sheets_url: Optional[str] = None         # last synced sheet URL (set by _auto_sync_sheets)
+    pending_email: Optional[dict] = None
+    sheets_url: Optional[str] = None
     pending_email_path: Optional[str] = None
-    # ^ BUG FIX: chatbot.py keeps one persistent ToolContext for a whole chat
+
+    # BUG FIX:
+    # chatbot.py keeps one persistent ToolContext for a whole chat
     # session, so in-memory pending_email works fine there. mcp_server.py
     # rebuilds a fresh ToolContext on every single tool call (by design,
     # for statelessness) — meaning a draft set by send_email was always
@@ -139,48 +197,96 @@ def tool_read_schedule(ctx: ToolContext, inp: dict) -> str:
     target = parse_day_str(inp.get("day", "today"))
     day_enum = DayOfWeek(target.strftime("%A").lower())
     commitments = load_routine(ctx.routine_path)
+
     day_comms = sorted(
         [c for c in commitments if day_enum in c.days],
         key=lambda c: c.time_slot.start,
     )
+
     label = target.strftime("%A, %B %d")
+
     if not day_comms:
         return f"No commitments on {label} — completely free."
+
     lines = [f"Schedule for {label}:"]
+
     for c in day_comms:
         lock = " [cannot be moved]" if not c.reschedulable else ""
-        lines.append(f"  • {c.time_slot.pretty():<25} {c.title}{lock} (priority {c.priority})")
+        lines.append(
+            f"  • {c.time_slot.pretty():<25} "
+            f"{c.title}{lock} (priority {c.priority})"
+        )
+
     return "\n".join(lines)
 
 
 def tool_check_time_slot(ctx: ToolContext, inp: dict) -> str:
     time_str = inp.get("time", "")
     duration = int(inp.get("duration_minutes", 60) or 60)
+
     start = parse_time_str(time_str)
+
     if start is None:
-        return f"Couldn't parse time '{time_str}'. Use format like '8pm' or '20:00'."
-    end_dt = datetime.combine(date.today(), start) + timedelta(minutes=duration)
-    slot = TimeSlot(start=start, end=end_dt.time())
+        return (
+            f"Couldn't parse time '{time_str}'. "
+            "Use format like '8pm' or '20:00'."
+        )
+
+    end_dt = datetime.combine(
+        date.today(),
+        start,
+    ) + timedelta(minutes=duration)
+
+    slot = TimeSlot(
+        start=start,
+        end=end_dt.time(),
+    )
+
     target = parse_day_str(inp.get("day", "today"))
-    is_free, conflict = is_slot_free(target, slot, load_routine(ctx.routine_path))
+
+    is_free, conflict = is_slot_free(
+        target,
+        slot,
+        load_routine(ctx.routine_path),
+    )
+
     if is_free:
         return f"{slot.pretty()} on {target.strftime('%A')} is free."
+
     return (
-        f"Conflict: '{conflict.title}' at {conflict.time_slot.pretty()} on {target.strftime('%A')}. "
-        f"Priority: {conflict.priority}, moveable: {conflict.reschedulable}."
+        f"Conflict: '{conflict.title}' at "
+        f"{conflict.time_slot.pretty()} on {target.strftime('%A')}. "
+        f"Priority: {conflict.priority}, "
+        f"moveable: {conflict.reschedulable}."
     )
 
 
 def tool_get_free_slots(ctx: ToolContext, inp: dict) -> str:
     day_str = inp.get("day", "today")
     duration = int(inp.get("duration_minutes", 60) or 60)
+
     target = parse_day_str(day_str)
     commitments = load_routine(ctx.routine_path)
-    slots = get_free_slots(target, commitments, duration_minutes=duration)
+
+    slots = get_free_slots(
+        target,
+        commitments,
+        duration_minutes=duration,
+    )
+
     if not slots:
-        return f"No free {duration}-minute gaps on {target.strftime('%A, %B %d')}."
+        return (
+            f"No free {duration}-minute gaps on "
+            f"{target.strftime('%A, %B %d')}."
+        )
+
     pretty = [s.pretty() for s in slots[:6]]
-    return f"Free {duration}-min slots on {target.strftime('%A, %B %d')}: {', '.join(pretty)}."
+
+    return (
+        f"Free {duration}-min slots on "
+        f"{target.strftime('%A, %B %d')}: "
+        f"{', '.join(pretty)}."
+    )
 
 
 def tool_get_weather(ctx: ToolContext, inp: dict) -> str:
@@ -196,11 +302,20 @@ def tool_schedule_meeting(ctx: ToolContext, inp: dict) -> str:
     day_str = inp.get("day", "today")
 
     start = parse_time_str(time_str)
+
     if start is None:
         return f"Couldn't parse time '{time_str}'."
 
-    end_dt = datetime.combine(date.today(), start) + timedelta(minutes=duration)
-    slot = TimeSlot(start=start, end=end_dt.time())
+    end_dt = datetime.combine(
+        date.today(),
+        start,
+    ) + timedelta(minutes=duration)
+
+    slot = TimeSlot(
+        start=start,
+        end=end_dt.time(),
+    )
+
     target = parse_day_str(day_str)
 
     request = MeetingRequest(
@@ -212,11 +327,18 @@ def tool_schedule_meeting(ctx: ToolContext, inp: dict) -> str:
         requested_time_slot=slot,
         duration_minutes=duration,
     )
-    decision = handle_meeting_request(request, target, ctx.config, ctx.routine_path)
+
+    decision = handle_meeting_request(
+        request,
+        target,
+        ctx.config,
+        ctx.routine_path,
+    )
 
     # Write confirmed meetings to routine
     if decision.action in ("confirm", "reschedule_and_confirm"):
         day_enum = DayOfWeek(target.strftime("%A").lower())
+
         new_c = Commitment(
             id=f"meeting-{title.lower().replace(' ', '-')}-{target}",
             title=title,
@@ -227,37 +349,71 @@ def tool_schedule_meeting(ctx: ToolContext, inp: dict) -> str:
             reschedulable=False,
             notes=f"Scheduled via assistant on {date.today()}",
         )
+
         with routine_transaction(ctx.routine_path) as existing:
             moved_note = ""
-            if decision.action == "reschedule_and_confirm" and decision.rescheduled_commitment:
-                # BUG FIX: the decision text claims the conflicting commitment was
-                # moved, but nothing ever actually moved it — it stayed at the same
-                # time as the new meeting, creating a real double-booking. Actually
-                # relocate it to a free slot on the same day before adding the new one.
+
+            if (
+                decision.action == "reschedule_and_confirm"
+                and decision.rescheduled_commitment
+            ):
+                # BUG FIX: the decision text claims the conflicting commitment
+                # was moved, but nothing ever actually moved it — it stayed at
+                # the same time as the new meeting, creating a real double-booking.
+                # Actually relocate it to a free slot on the same day before
+                # adding the new one.
                 displaced = decision.rescheduled_commitment
                 displaced_duration = displaced.time_slot.duration_minutes()
+
                 same_day_others = [
-                    c for c in existing
+                    c
+                    for c in existing
                     if c.id != displaced.id and day_enum in c.days
-                ] + [new_c]  # the new meeting itself also occupies time now
-                free_slots = get_free_slots(target, same_day_others, displaced_duration)
+                ] + [new_c]
+
+                free_slots = get_free_slots(
+                    target,
+                    same_day_others,
+                    displaced_duration,
+                )
+
                 if free_slots:
                     new_slot_for_displaced = free_slots[0]
+
                     for c in existing:
                         if c.id == displaced.id:
                             c.time_slot = new_slot_for_displaced
-                            c.notes = (c.notes + " " if c.notes else "") + \
-                                f"Auto-rescheduled from {displaced.time_slot.pretty()} to make room for '{title}' on {target}."
-                            moved_note = f" '{displaced.title}' was moved to {new_slot_for_displaced.pretty()}."
+                            c.notes = (
+                                (c.notes + " " if c.notes else "")
+                                + f"Auto-rescheduled from "
+                                f"{displaced.time_slot.pretty()} to make room "
+                                f"for '{title}' on {target}."
+                            )
+
+                            moved_note = (
+                                f" '{displaced.title}' was moved to "
+                                f"{new_slot_for_displaced.pretty()}."
+                            )
                             break
+
                 else:
                     # No free slot to move it to — don't silently claim success.
                     # Remove it instead of leaving a phantom double-booking, and
                     # say so plainly rather than pretending it was rescheduled.
-                    existing[:] = [c for c in existing if c.id != displaced.id]
-                    moved_note = f" I couldn't find another slot for '{displaced.title}' today, so it was removed — please reschedule it manually."
+                    existing[:] = [
+                        c
+                        for c in existing
+                        if c.id != displaced.id
+                    ]
+
+                    moved_note = (
+                        f" I couldn't find another slot for "
+                        f"'{displaced.title}' today, so it was removed — "
+                        "please reschedule it manually."
+                    )
 
             existing.append(new_c)
+
         if moved_note:
             decision.reply_message += moved_note
 
@@ -266,8 +422,10 @@ def tool_schedule_meeting(ctx: ToolContext, inp: dict) -> str:
         f"{decision.reply_message} "
         f"(Reasoning: {decision.reasoning})"
     )
+
     if decision.action in ("confirm", "reschedule_and_confirm"):
         result += _auto_sync_sheets(ctx)
+
     return result
 
 
@@ -276,30 +434,68 @@ def tool_reschedule_commitment(ctx: ToolContext, inp: dict) -> str:
     new_time_str = inp.get("new_time", "")
 
     new_start = parse_time_str(new_time_str)
+
     if new_start is None:
         return f"Couldn't parse new time '{new_time_str}'."
 
     old_pretty = None
     new_pretty = None
     error = None
+
     with routine_transaction(ctx.routine_path) as commitments:
-        match = next((c for c in commitments if c.title.lower() == title.lower()), None)
+        match = next(
+            (
+                c
+                for c in commitments
+                if c.title.lower() == title.lower()
+            ),
+            None,
+        )
+
         if match is None:
-            match = next((c for c in commitments if title.lower() in c.title.lower()), None)
+            match = next(
+                (
+                    c
+                    for c in commitments
+                    if title.lower() in c.title.lower()
+                ),
+                None,
+            )
+
         if match is None:
             names = ", ".join(c.title for c in commitments)
-            error = f"No commitment named '{title}'. Existing: {names}."
+            error = (
+                f"No commitment named '{title}'. "
+                f"Existing: {names}."
+            )
+
         else:
             old_pretty = match.time_slot.pretty()
             old_dur = match.time_slot.duration_minutes()
-            end_dt = datetime.combine(date.today(), new_start) + timedelta(minutes=old_dur)
-            match.time_slot = TimeSlot(start=new_start, end=end_dt.time())
-            match.notes = f"Rescheduled from {old_pretty} via assistant."
+
+            end_dt = datetime.combine(
+                date.today(),
+                new_start,
+            ) + timedelta(minutes=old_dur)
+
+            match.time_slot = TimeSlot(
+                start=new_start,
+                end=end_dt.time(),
+            )
+
+            match.notes = (
+                f"Rescheduled from {old_pretty} via assistant."
+            )
+
             new_pretty = match.time_slot.pretty()
 
     if error:
         return error
-    result = f"Moved '{title}' from {old_pretty} to {new_pretty}."
+
+    result = (
+        f"Moved '{title}' from {old_pretty} to {new_pretty}."
+    )
+
     return result + _auto_sync_sheets(ctx)
 
 
@@ -307,82 +503,366 @@ def tool_cancel_commitment(ctx: ToolContext, inp: dict) -> str:
     title = inp.get("commitment_title", "")
     removed = 0
     error = None
+
     with routine_transaction(ctx.routine_path) as commitments:
         before = len(commitments)
-        commitments[:] = [c for c in commitments if c.title.lower() != title.lower()]
+
+        commitments[:] = [
+            c
+            for c in commitments
+            if c.title.lower() != title.lower()
+        ]
+
         if len(commitments) == before:
-            commitments[:] = [c for c in commitments if title.lower() not in c.title.lower()]
+            commitments[:] = [
+                c
+                for c in commitments
+                if title.lower() not in c.title.lower()
+            ]
+
         if len(commitments) == before:
             names = ", ".join(c.title for c in commitments)
-            error = f"No commitment named '{title}'. Existing: {names}."
+            error = (
+                f"No commitment named '{title}'. "
+                f"Existing: {names}."
+            )
+
         else:
             removed = before - len(commitments)
 
     if error:
         return error
-    result = f"Removed {removed} commitment(s) matching '{title}'."
+
+    result = (
+        f"Removed {removed} commitment(s) "
+        f"matching '{title}'."
+    )
+
     return result + _auto_sync_sheets(ctx)
 
 
 def tool_add_recurring_commitment(ctx: ToolContext, inp: dict) -> str:
     title = inp.get("title", "New Commitment")
     time_str = inp.get("time", "09:00")
-    days_raw = expand_day_shortcuts(inp.get("days", ["monday"]))
-    commitment_type = inp.get("commitment_type", "work_meeting")
-    duration = int(inp.get("duration_minutes", 60) or 60)
+    days_raw = expand_day_shortcuts(
+        inp.get("days", ["monday"])
+    )
+
+    # IMPORTANT:
+    # Do not default to "work_meeting" here. None means the caller did not
+    # explicitly provide a commitment type, allowing us to preserve an
+    # existing type or infer a type from the title.
+    requested_type = inp.get("commitment_type")
+
+    duration = int(
+        inp.get("duration_minutes", 60) or 60
+    )
 
     start = parse_time_str(time_str)
+
     if start is None:
         return f"Couldn't parse time '{time_str}'."
 
     day_enums = []
+
     for d in days_raw:
         try:
-            day_enums.append(DayOfWeek(d.lower()))
+            day_enums.append(
+                DayOfWeek(d.lower())
+            )
         except ValueError:
             pass
-    if not day_enums:
-        return f"No valid days in {inp.get('days', [])}. Use: monday, tuesday, ..., everyday, weekdays."
 
-    end_dt = datetime.combine(date.today(), start) + timedelta(minutes=duration)
-    cfg = ctx.config.get_commitment_config(commitment_type)
+    if not day_enums:
+        return (
+            f"No valid days in {inp.get('days', [])}. "
+            "Use: monday, tuesday, ..., everyday, weekdays."
+        )
+
+    # Load the existing routine so we can determine whether this is an
+    # update to an existing same-titled commitment.
+    existing_commitments = load_routine(
+        ctx.routine_path
+    )
+
+    existing_match = None
+
+    for commitment in existing_commitments:
+        if commitment.title.lower() == title.lower():
+            existing_match = commitment
+            break
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Determine commitment type
+    # ─────────────────────────────────────────────────────────────────────
+
+    if requested_type:
+        # The caller explicitly chose a type.
+        commitment_type = str(requested_type).strip()
+
+    elif existing_match:
+        # No type was supplied while updating an existing commitment.
+        # Preserve the commitment's current type.
+        commitment_type = existing_match.commitment_type
+
+    else:
+        # New commitment with no explicit type.
+        # Try to infer the type from the title.
+        commitment_type = None
+
+        title_lower = title.lower()
+
+        try:
+            configured_types = (
+                ctx.config.get_commitment_types()
+            )
+        except AttributeError:
+            configured_types = []
+
+        # First: exact configured type phrase.
+        #
+        # Example:
+        #   config type = "work_meeting"
+        #   title = "work meeting with manager"
+        #
+        # The normalized type becomes "work meeting", which is found
+        # inside the title.
+        for configured_type in configured_types:
+            normalized_type = (
+                configured_type
+                .lower()
+                .replace("_", " ")
+            )
+
+            if normalized_type in title_lower:
+                commitment_type = configured_type
+                break
+
+        # Second: individual meaningful words from the configured type.
+        #
+        # Example:
+        #   config type = "gym"
+        #   title = "Gym workout"
+        #
+        # This lets the system infer "gym".
+        if commitment_type is None:
+            for configured_type in configured_types:
+                type_words = [
+                    word
+                    for word in (
+                        configured_type
+                        .lower()
+                        .replace("_", " ")
+                        .split()
+                    )
+                    if len(word) >= 3
+                ]
+
+                if (
+                    type_words
+                    and all(
+                        word in title_lower
+                        for word in type_words
+                    )
+                ):
+                    commitment_type = configured_type
+                    break
+
+        # Final fallback only if no type could be inferred.
+        if commitment_type is None:
+            commitment_type = "work_meeting"
+
+    commitment_type = commitment_type.strip()
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Validate the selected type against config.yaml
+    # ─────────────────────────────────────────────────────────────────────
+
+    try:
+        configured_types = (
+            ctx.config.get_commitment_types()
+        )
+    except AttributeError:
+        configured_types = []
+
+    if (
+        configured_types
+        and commitment_type not in configured_types
+    ):
+        if existing_match and not requested_type:
+            # Preserve the existing type if it came from the existing
+            # commitment. Do not unexpectedly change it.
+            pass
+        else:
+            # Explicitly invalid type or failed inference:
+            # use the final fallback.
+            commitment_type = "work_meeting"
+
+    # Get priority/reschedulable settings for the selected type.
+    cfg = ctx.config.get_commitment_config(
+        commitment_type
+    )
+
+    end_dt = datetime.combine(
+        date.today(),
+        start,
+    ) + timedelta(minutes=duration)
+
     new_c = Commitment(
         id=f"{title.lower().replace(' ', '-')}-recurring",
         title=title,
         commitment_type=commitment_type,
         days=day_enums,
-        time_slot=TimeSlot(start=start, end=end_dt.time()),
+        time_slot=TimeSlot(
+            start=start,
+            end=end_dt.time(),
+        ),
         priority=cfg.get("priority", 5),
         reschedulable=cfg.get("reschedulable", True),
         notes=f"Added via assistant on {date.today()}",
     )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Detect an actual type change
+    # ─────────────────────────────────────────────────────────────────────
+
+    type_warning = ""
+
+    if (
+        existing_match
+        and existing_match.commitment_type != commitment_type
+    ):
+        old_type = existing_match.commitment_type
+
+        old_cfg = ctx.config.get_commitment_config(
+            old_type
+        )
+
+        old_priority = old_cfg.get(
+            "priority",
+            existing_match.priority,
+        )
+
+        old_reschedulable = old_cfg.get(
+            "reschedulable",
+            existing_match.reschedulable,
+        )
+
+        new_priority = cfg.get(
+            "priority",
+            new_c.priority,
+        )
+
+        new_reschedulable = cfg.get(
+            "reschedulable",
+            new_c.reschedulable,
+        )
+
+        old_mobility = (
+            "movable"
+            if old_reschedulable
+            else "locked"
+        )
+
+        new_mobility = (
+            "movable"
+            if new_reschedulable
+            else "locked"
+        )
+
+        type_warning = (
+            f" ⚠️ Type changed from '{old_type}' "
+            f"(priority {old_priority}, {old_mobility}) "
+            f"to '{commitment_type}' "
+            f"(priority {new_priority}, {new_mobility})"
+        )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Replace same-titled commitment and save the new one
+    # ─────────────────────────────────────────────────────────────────────
+
     with routine_transaction(ctx.routine_path) as commitments:
-        commitments[:] = [c for c in commitments if c.title.lower() != title.lower()]
+        commitments[:] = [
+            c
+            for c in commitments
+            if c.title.lower() != title.lower()
+        ]
+
         commitments.append(new_c)
-    days_str = ", ".join(d.value for d in day_enums)
-    result = f"Added '{title}' every {days_str} at {new_c.time_slot.pretty()}."
+
+    days_str = ", ".join(
+        d.value
+        for d in day_enums
+    )
+
+    result = (
+        f"Added '{title}' every {days_str} "
+        f"at {new_c.time_slot.pretty()}."
+        f"{type_warning}"
+    )
+
     return result + _auto_sync_sheets(ctx)
 
 
 def tool_send_slack_message(ctx: ToolContext, inp: dict) -> str:
-    if ctx.slack is None or not getattr(ctx.slack, "bot_token", None):
-        return "Slack not configured — add SLACK_BOT_TOKEN to .env."
-    channel = inp.get("channel", "meeting-times").lstrip("#")
-    message = inp.get("message", "")
+    if ctx.slack is None or not getattr(
+        ctx.slack,
+        "bot_token",
+        None,
+    ):
+        return (
+            "Slack not configured — "
+            "add SLACK_BOT_TOKEN to .env."
+        )
+
+    channel = inp.get(
+        "channel",
+        "meeting-times",
+    ).lstrip("#")
+
+    message = inp.get(
+        "message",
+        "",
+    )
+
     if not message:
         return "No message provided."
+
     try:
-        channel_id = ctx.slack.resolve_channel_id(channel)
+        channel_id = ctx.slack.resolve_channel_id(
+            channel
+        )
+
         if not channel_id:
-            channels = getattr(ctx.service_config, "slack_channel_ids", []) or []
+            channels = getattr(
+                ctx.service_config,
+                "slack_channel_ids",
+                [],
+            ) or []
+
             for cid in channels:
-                channel_id = ctx.slack.resolve_channel_id(cid)
+                channel_id = (
+                    ctx.slack.resolve_channel_id(cid)
+                )
+
                 if channel_id:
                     break
+
         if not channel_id:
-            return f"Couldn't find Slack channel '{channel}'. Check the channel name."
-        ctx.slack.send_message(channel_id, message)
-        return f"Sent to #{channel}: \"{message}\""
+            return (
+                f"Couldn't find Slack channel "
+                f"'{channel}'. Check the channel name."
+            )
+
+        ctx.slack.send_message(
+            channel_id,
+            message,
+        )
+
+        return (
+            f"Sent to #{channel}: \"{message}\""
+        )
+
     except Exception as exc:
         return f"Slack error: {exc}"
 
@@ -391,39 +871,82 @@ def _save_pending_email(ctx: ToolContext) -> None:
     """Persist ctx.pending_email to disk if a path is configured (mcp_server.py's case)."""
     if not ctx.pending_email_path:
         return
+
     try:
-        with open(ctx.pending_email_path, "w", encoding="utf-8") as f:
+        with open(
+            ctx.pending_email_path,
+            "w",
+            encoding="utf-8",
+        ) as f:
             if ctx.pending_email:
-                json.dump(ctx.pending_email, f)
+                json.dump(
+                    ctx.pending_email,
+                    f,
+                )
             else:
                 f.write("")
+
     except OSError:
-        pass  # best-effort — worst case the confirmation step just won't find it
+        pass
 
 
 def _load_pending_email(path: str) -> Optional[dict]:
     """Load a persisted pending_email, if any, for a freshly-built ToolContext."""
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(
+            path,
+            encoding="utf-8",
+        ) as f:
             raw = f.read().strip()
-        return json.loads(raw) if raw else None
-    except (OSError, json.JSONDecodeError):
+
+        return (
+            json.loads(raw)
+            if raw
+            else None
+        )
+
+    except (
+        OSError,
+        json.JSONDecodeError,
+    ):
         return None
 
 
 def tool_send_email(ctx: ToolContext, inp: dict) -> str:
     """Draft an email; set send_now=True only if user explicitly said to send."""
     to_email = inp.get("to_email", "")
-    subject = inp.get("subject", "Message from your assistant")
-    context_text = inp.get("context", "")
-    send_now = bool(inp.get("send_now", False))
+    subject = inp.get(
+        "subject",
+        "Message from your assistant",
+    )
+    context_text = inp.get(
+        "context",
+        "",
+    )
+    send_now = bool(
+        inp.get(
+            "send_now",
+            False,
+        )
+    )
 
-    if not re.match(r"[^@]+@[^@]+\.[^@]+", to_email):
-        return f"Invalid email address: '{to_email}'"
+    if not re.match(
+        r"[^@]+@[^@]+\.[^@]+",
+        to_email,
+    ):
+        return (
+            f"Invalid email address: '{to_email}'"
+        )
 
     from email_agent import EmailAgent
+
     agent = EmailAgent()
-    draft = agent.draft_email(to_email, subject, context_text)
+
+    draft = agent.draft_email(
+        to_email,
+        subject,
+        context_text,
+    )
 
     # Store draft so user can confirm/cancel via confirm_pending_email tool
     ctx.pending_email = {
@@ -431,74 +954,174 @@ def tool_send_email(ctx: ToolContext, inp: dict) -> str:
         "subject": subject,
         "draft": draft,
     }
+
     _save_pending_email(ctx)
 
-    if send_now and ctx.google and getattr(ctx.google, "creds", None):
+    if (
+        send_now
+        and ctx.google
+        and getattr(
+            ctx.google,
+            "creds",
+            None,
+        )
+    ):
         try:
-            ctx.google.send_email(to_email, subject, draft)
+            ctx.google.send_email(
+                to_email,
+                subject,
+                draft,
+            )
+
             ctx.pending_email = None
             _save_pending_email(ctx)
-            return f"Email sent to {to_email}.\n\nSubject: {subject}\n\n{draft}"
+
+            return (
+                f"Email sent to {to_email}.\n\n"
+                f"Subject: {subject}\n\n"
+                f"{draft}"
+            )
+
         except Exception as exc:
-            return f"Draft ready but send failed: {exc}\n\nDraft:\nSubject: {subject}\n\n{draft}"
+            return (
+                f"Draft ready but send failed: {exc}\n\n"
+                f"Draft:\nSubject: {subject}\n\n"
+                f"{draft}"
+            )
 
     return (
         f"Draft ready for {to_email}:\n\n"
-        f"Subject: {subject}\n\n{draft}\n\n"
-        f"Reply 'send it' to send, or 'cancel' to discard."
+        f"Subject: {subject}\n\n"
+        f"{draft}\n\n"
+        "Reply 'send it' to send, or 'cancel' to discard."
     )
 
 
-def tool_confirm_pending_email(ctx: ToolContext, inp: dict) -> str:
-    confirm = (inp.get("confirm") or "").strip().lower()
+def tool_confirm_pending_email(
+    ctx: ToolContext,
+    inp: dict,
+) -> str:
+    confirm = (
+        inp.get("confirm") or ""
+    ).strip().lower()
+
     # BUG FIX: mcp_server.py builds a fresh ToolContext per call, so the
     # in-memory ctx.pending_email set by send_email is always gone by the
     # time this runs — load it back from disk if a persistence path was
-    # configured (see _save_pending_email/ToolContext.pending_email_path).
-    if not ctx.pending_email and ctx.pending_email_path:
-        ctx.pending_email = _load_pending_email(ctx.pending_email_path)
+    # configured.
+    if (
+        not ctx.pending_email
+        and ctx.pending_email_path
+    ):
+        ctx.pending_email = _load_pending_email(
+            ctx.pending_email_path
+        )
+
     if not ctx.pending_email:
-        return "No pending email draft to confirm."
-    if confirm in ("yes", "send", "send it", "confirm", "approve"):
+        return (
+            "No pending email draft to confirm."
+        )
+
+    if confirm in (
+        "yes",
+        "send",
+        "send it",
+        "confirm",
+        "approve",
+    ):
         pending = ctx.pending_email
+
         ctx.pending_email = None
         _save_pending_email(ctx)
-        if ctx.google and getattr(ctx.google, "creds", None):
+
+        if (
+            ctx.google
+            and getattr(
+                ctx.google,
+                "creds",
+                None,
+            )
+        ):
             try:
-                ctx.google.send_email(pending["to_email"], pending["subject"], pending["draft"])
-                return f"Email sent to {pending['to_email']}."
+                ctx.google.send_email(
+                    pending["to_email"],
+                    pending["subject"],
+                    pending["draft"],
+                )
+
+                return (
+                    f"Email sent to "
+                    f"{pending['to_email']}."
+                )
+
             except Exception as exc:
                 return f"Send failed: {exc}"
-        return f"Gmail not connected. Here's the draft to copy:\n\n{pending['draft']}"
+
+        return (
+            "Gmail not connected. "
+            "Here's the draft to copy:\n\n"
+            f"{pending['draft']}"
+        )
+
     ctx.pending_email = None
     _save_pending_email(ctx)
+
     return "Email cancelled."
 
 
 def tool_remember_fact(ctx: ToolContext, inp: dict) -> str:
     fact = inp.get("fact", "")
-    category = inp.get("category", "preferences")
+    category = inp.get(
+        "category",
+        "preferences",
+    )
+
     if not fact:
         return "No fact provided."
+
     if ctx.knowledge_base:
         try:
-            ctx.knowledge_base.add_fact(fact, category=category, source="user")
+            ctx.knowledge_base.add_fact(
+                fact,
+                category=category,
+                source="user",
+            )
+
             return f"Remembered: {fact}"
+
         except Exception as exc:
-            return f"Could not save to knowledge base: {exc}"
-    return f"(Knowledge base not connected) Noted: {fact}"
+            return (
+                f"Could not save to knowledge base: "
+                f"{exc}"
+            )
+
+    return (
+        f"(Knowledge base not connected) "
+        f"Noted: {fact}"
+    )
 
 
 def tool_recall_memory(ctx: ToolContext, inp: dict) -> str:
     if ctx.knowledge_base:
         try:
-            return ctx.knowledge_base.build_profile_summary() or "Nothing stored yet."
+            return (
+                ctx.knowledge_base.build_profile_summary()
+                or "Nothing stored yet."
+            )
+
         except Exception as exc:
-            return f"Could not read knowledge base: {exc}"
+            return (
+                f"Could not read knowledge base: "
+                f"{exc}"
+            )
+
     return "Knowledge base not connected."
 
 
-def tool_get_configured_requesters(ctx: ToolContext, inp: dict) -> str:
+def tool_get_configured_requesters(
+    ctx: ToolContext,
+    inp: dict,
+) -> str:
     try:
         # BUG FIX: this used to re-open config.yaml itself via
         # getattr(ctx.config, "_path", "config.yaml") — but Config has no
@@ -507,31 +1130,67 @@ def tool_get_configured_requesters(ctx: ToolContext, inp: dict) -> str:
         # directory could no longer be assumed to be the extension's own
         # folder. ctx.config already has this data loaded correctly
         # (via its own proper path-resolution fallback) — just use it.
-        requesters = ctx.config.get_all_requesters()
+        requesters = (
+            ctx.config.get_all_requesters()
+        )
+
         lines = []
+
         for key, data in requesters.items():
             if key == "default_unknown":
-                lines.append(f"  unknown: priority {data['priority']}")
+                lines.append(
+                    f"  unknown: priority "
+                    f"{data['priority']}"
+                )
             else:
-                lines.append(f"  {data.get('display_name', key)}: priority {data['priority']} ({data.get('relationship', '')})")
-        return "Configured requesters:\n" + "\n".join(lines)
+                lines.append(
+                    f"  {data.get('display_name', key)}: "
+                    f"priority {data['priority']} "
+                    f"({data.get('relationship', '')})"
+                )
+
+        return (
+            "Configured requesters:\n"
+            + "\n".join(lines)
+        )
+
     except Exception as exc:
-        return f"Could not read requesters: {exc}"
+        return (
+            f"Could not read requesters: {exc}"
+        )
 
 
-def tool_health_check(ctx: ToolContext, inp: dict) -> str:
+def tool_health_check(
+    ctx: ToolContext,
+    inp: dict,
+) -> str:
     # BUG FIX: this used to check os.getenv('ANTHROPIC_API_KEY') only, same
     # hardcoding pattern already found and fixed in email_agent.py and
     # knowledge_base.py — anyone running on the free Groq/Gemini tier this
     # project recommends would see "MISSING" despite everything working.
     from llm_provider import LLMProvider
+
     provider = LLMProvider()
+
     parts = [
-        f"LLM provider: {provider.display_name if provider.is_configured else 'MISSING'}",
-        f"Slack: {'ready' if (ctx.slack and getattr(ctx.slack, 'bot_token', None)) else 'not configured'}",
-        f"Gmail: {'ready' if (ctx.google and getattr(ctx.google, 'creds', None)) else 'not configured'}",
-        f"Routine: {len(load_routine(ctx.routine_path))} commitment(s)",
+        (
+            f"LLM provider: "
+            f"{provider.display_name if provider.is_configured else 'MISSING'}"
+        ),
+        (
+            f"Slack: "
+            f"{'ready' if (ctx.slack and getattr(ctx.slack, 'bot_token', None)) else 'not configured'}"
+        ),
+        (
+            f"Gmail: "
+            f"{'ready' if (ctx.google and getattr(ctx.google, 'creds', None)) else 'not configured'}"
+        ),
+        (
+            f"Routine: "
+            f"{len(load_routine(ctx.routine_path))} commitment(s)"
+        ),
     ]
+
     return "\n".join(parts)
 
 
@@ -543,32 +1202,63 @@ def _auto_sync_sheets(ctx: ToolContext) -> str:
     Returns a short status string to append to the tool result.
     Silently skips if Google credentials are not configured.
     """
-    if ctx.google is None or not getattr(ctx.google, "creds", None):
-        return ""
-    try:
-        si = ctx.google.get_sheets_integration()
-        url = si.sync(ctx.routine_path)
-        ctx.sheets_url = url   # stash so web_app can display it
-        return f"\n📊 Sheet updated: {url}"
-    except Exception as exc:
-        return f"\n(Sheets sync failed: {exc})"
-
-
-def tool_sync_to_sheets(ctx: ToolContext, inp: dict) -> str:
-    """Manually trigger a full sheet sync. Returns the sheet URL."""
-    if ctx.google is None or not getattr(ctx.google, "creds", None):
-        return (
-            "Google credentials not configured. "
-            "Add credentials.json and run: python google_integration.py\n"
-            "Make sure the Sheets scope is included (delete token.json if you already have one)."
+    if (
+        ctx.google is None
+        or not getattr(
+            ctx.google,
+            "creds",
+            None,
         )
+    ):
+        return ""
+
     try:
         si = ctx.google.get_sheets_integration()
         url = si.sync(ctx.routine_path)
         ctx.sheets_url = url
-        return f"Schedule synced to Google Sheets:\n{url}"
+
+        return f"\n📊 Sheet updated: {url}"
+
     except Exception as exc:
-        return f"Sheets sync error: {exc}"
+        return (
+            f"\n(Sheets sync failed: {exc})"
+        )
+
+
+def tool_sync_to_sheets(
+    ctx: ToolContext,
+    inp: dict,
+) -> str:
+    """Manually trigger a full sheet sync. Returns the sheet URL."""
+    if (
+        ctx.google is None
+        or not getattr(
+            ctx.google,
+            "creds",
+            None,
+        )
+    ):
+        return (
+            "Google credentials not configured. "
+            "Add credentials.json and run: python google_integration.py\n"
+            "Make sure the Sheets scope is included "
+            "(delete token.json if you already have one)."
+        )
+
+    try:
+        si = ctx.google.get_sheets_integration()
+        url = si.sync(ctx.routine_path)
+        ctx.sheets_url = url
+
+        return (
+            f"Schedule synced to Google Sheets:\n"
+            f"{url}"
+        )
+
+    except Exception as exc:
+        return (
+            f"Sheets sync error: {exc}"
+        )
 
 
 # ─── Dispatch table ───────────────────────────────────────────────────────────
@@ -579,7 +1269,7 @@ TOOL_DISPATCH: dict = {
     "check_time_slot":          tool_check_time_slot,
     "get_free_slots":           tool_get_free_slots,
     "get_weather":              tool_get_weather,
-    "schedule_meeting":         tool_schedule_meeting,
+    "schedule_meeting":          tool_schedule_meeting,
     "reschedule_commitment":    tool_reschedule_commitment,
     "cancel_commitment":        tool_cancel_commitment,
     "add_recurring_commitment": tool_add_recurring_commitment,
@@ -587,19 +1277,33 @@ TOOL_DISPATCH: dict = {
     "send_email":               tool_send_email,
     "confirm_pending_email":    tool_confirm_pending_email,
     "remember_fact":            tool_remember_fact,
-    "recall_memory":            tool_recall_memory,
+    "recall_memory":             tool_recall_memory,
     "get_configured_requesters": tool_get_configured_requesters,
-    "health_check":             tool_health_check,
-    "sync_to_sheets":           tool_sync_to_sheets,
+    "health_check":              tool_health_check,
+    "sync_to_sheets":            tool_sync_to_sheets,
 }
 
 
-def execute(ctx: ToolContext, tool_name: str, tool_input: dict) -> str:
+def execute(
+    ctx: ToolContext,
+    tool_name: str,
+    tool_input: dict,
+) -> str:
     """Single entry point for both chatbot.py and mcp_server.py."""
     fn = TOOL_DISPATCH.get(tool_name)
+
     if fn is None:
         return f"Unknown tool: {tool_name}"
+
     try:
-        return str(fn(ctx, tool_input))
+        return str(
+            fn(
+                ctx,
+                tool_input,
+            )
+        )
+
     except Exception as exc:
-        return f"Tool '{tool_name}' error: {exc}"
+        return (
+            f"Tool '{tool_name}' error: {exc}"
+        )

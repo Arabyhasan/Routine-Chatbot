@@ -78,6 +78,10 @@ class Config:
             "notes":        "",
         })
 
+    def get_commitment_types(self) -> list[str]:
+        """Every commitment_type key defined in config.yaml's `commitments` section."""
+        return list(self._raw.get("commitments", {}).keys())
+
     # ── Conflict resolution thresholds ────────────────────────────────────
 
     @property
