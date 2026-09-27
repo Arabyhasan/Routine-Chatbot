@@ -282,6 +282,15 @@ def send_email(
 
 
 @mcp.tool()
+def read_recent_emails(max_results: int = 5) -> str:
+    """Read the user's most recent Gmail messages (sender/subject/snippet) for summarizing."""
+    return _call(
+        "read_recent_emails",
+        max_results=max_results,
+    )
+
+
+@mcp.tool()
 def get_configured_requesters() -> str:
     """Show known requesters and their priority levels."""
     return _call("get_configured_requesters")

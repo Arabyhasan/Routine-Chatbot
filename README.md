@@ -102,7 +102,7 @@ conflict_resolution:
 
 ---
 
-## Tools available to the agent (16 total)
+## Tools available to the agent (17 total)
 
 | Tool | What it does |
 |---|---|
@@ -116,6 +116,7 @@ conflict_resolution:
 | `add_recurring_commitment` | Add gym every weekday at 8pm |
 | `send_slack_message` | Post to a Slack channel |
 | `send_email` | Draft + optionally send via Gmail |
+| `read_recent_emails` | Read + summarize the most recent Gmail messages |
 | `confirm_pending_email` | Confirm or cancel a pending draft |
 | `sync_to_sheets` | Force a full Google Sheets sync |
 | `remember_fact` | Store a preference or fact |
@@ -150,22 +151,11 @@ GROQ_API_KEY=gsk_...        # get from https://console.groq.com
 
 ## Run
 
-**Web chatbot** → http://localhost:8000
-```bash
-python web_app.py
-```
+### Primary: Claude Desktop (MCP server)
 
-**Terminal mode**
-```bash
-python chatbot.py
-```
-
-**MCP server** (for Claude Desktop integration)
-```bash
-python mcp_server.py
-```
-
-### Connect it to Claude Desktop
+This is the main way to use Routine Agent — Claude Desktop's own chat becomes the
+interface, using Claude's full model instead of the free Groq/Gemini fallback the
+standalone chatbot uses.
 
 1. Install the dependencies in the project virtual environment: `python -m pip install -r requirements.txt`.
 2. In Claude Desktop, open **Settings → Developer → Edit Config**.
@@ -182,9 +172,27 @@ python mcp_server.py
 }
 ```
 
-4. Restart Claude Desktop, then ask: `What's the weather in Dhaka?`
+4. Restart Claude Desktop (needed both on first setup and after any tool changes in
+   `mcp_tools.py`/`mcp_server.py`, since the tool list is only read at startup), then ask:
+   `What's the weather in Dhaka?`
 
 Claude Desktop starts this local server over stdio; do not run a second copy in a terminal.
+
+### Secondary: standalone web chatbot / terminal
+
+Useful for onboarding (creating a profile, connecting Google/Slack the first time)
+or running without Claude Desktop installed, but talks to the free-tier LLM
+(Groq/Gemini) rather than Claude directly.
+
+**Web chatbot** → http://localhost:8000
+```bash
+python web_app.py
+```
+
+**Terminal mode**
+```bash
+python chatbot.py
+```
 
 ---
 

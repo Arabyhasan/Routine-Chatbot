@@ -22,3 +22,6 @@ dist/
 .slack_mcp_tokens.json
 
 RoutineAgent.exe
+
+# Per-user encrypted account vaults (local profiles, not shared)
+profiles/

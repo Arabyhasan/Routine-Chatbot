@@ -912,6 +912,32 @@ def _load_pending_email(path: str) -> Optional[dict]:
         return None
 
 
+def tool_read_recent_emails(ctx: ToolContext, inp: dict) -> str:
+    """Fetch the user's most recent Gmail messages (subject/sender/snippet) for summarizing."""
+    max_results = int(inp.get("max_results", 5))
+
+    if not ctx.google or not getattr(ctx.google, "creds", None):
+        return "Gmail is not configured. Connect Google first (credentials.json + token.json)."
+
+    try:
+        emails = ctx.google.list_recent_messages_detailed(max_results=max_results)
+    except Exception as exc:
+        return f"Could not read Gmail messages: {exc}"
+
+    if not emails:
+        return "No recent emails found."
+
+    lines = [f"Last {len(emails)} email(s):", ""]
+    for i, e in enumerate(emails, start=1):
+        lines.append(f"{i}. From: {e['from']}")
+        lines.append(f"   Subject: {e['subject']}")
+        lines.append(f"   Date: {e['date']}")
+        lines.append(f"   Snippet: {e['snippet']}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def tool_send_email(ctx: ToolContext, inp: dict) -> str:
     """Draft an email; set send_now=True only if user explicitly said to send."""
     to_email = inp.get("to_email", "")
@@ -1275,6 +1301,7 @@ TOOL_DISPATCH: dict = {
     "add_recurring_commitment": tool_add_recurring_commitment,
     "send_slack_message":       tool_send_slack_message,
     "send_email":               tool_send_email,
+    "read_recent_emails":        tool_read_recent_emails,
     "confirm_pending_email":    tool_confirm_pending_email,
     "remember_fact":            tool_remember_fact,
     "recall_memory":             tool_recall_memory,

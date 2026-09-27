@@ -101,6 +101,28 @@ class GoogleIntegration:
         result = service.users().messages().list(userId="me", maxResults=max_results).execute()
         return result.get("messages", [])
 
+    def list_recent_messages_detailed(self, max_results: int = 5) -> List[Dict[str, Any]]:
+        """Like list_recent_messages, but resolves each id into subject/from/date/snippet."""
+        service = self.get_gmail_service()
+        stubs = self.list_recent_messages(max_results=max_results)
+
+        emails: List[Dict[str, Any]] = []
+        for stub in stubs:
+            msg = service.users().messages().get(
+                userId="me",
+                id=stub["id"],
+                format="metadata",
+                metadataHeaders=["From", "Subject", "Date"],
+            ).execute()
+            headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
+            emails.append({
+                "from": headers.get("From", "(unknown sender)"),
+                "subject": headers.get("Subject", "(no subject)"),
+                "date": headers.get("Date", ""),
+                "snippet": msg.get("snippet", ""),
+            })
+        return emails
+
     def send_email(self, to_email: str, subject: str, body: str) -> Dict[str, Any]:
         service = self.get_gmail_service()
         from email.mime.text import MIMEText
