@@ -254,8 +254,9 @@ class SheetsIntegration:
         rows = [header]
 
         for s in time_slots:
+            block_end = (datetime.combine(date.today(), s) + timedelta(minutes=STEP_MINUTES)).time()
             row = [
-                s.strftime("%I:%M %p")
+                f"{s.strftime('%I:%M %p')} - {block_end.strftime('%I:%M %p')}"
             ]
 
             for d in dates:
