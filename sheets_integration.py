@@ -31,7 +31,7 @@ from routine_manager import load_routine
 
 WORK_START     = time(10, 0)
 WORK_END       = time(22, 0)
-STEP_MINUTES   = 30
+STEP_MINUTES   = 120
 SHEET_TITLE    = "Routine Agent — Weekly Schedule"
 STATE_FILE     = "sheet_state.json"
 

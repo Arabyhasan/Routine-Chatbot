@@ -16,7 +16,7 @@ WORK_START = time(10, 0)
 WORK_END   = time(22, 0)
 
 # Granularity when scanning for free slots (every 30 min)
-SLOT_STEP_MINUTES = 30
+SLOT_STEP_MINUTES = 120
 
 
 def _weekday_name(d: date) -> DayOfWeek:
