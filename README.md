@@ -134,7 +134,8 @@ conflict_resolution:
 git clone https://github.com/Arabyhasan/Routine-Chatbot.git
 cd Routine-Chatbot
 python -m pip install -r requirements.txt
-Copy-Item env.example .env
+Copy-Item .env.example .env
+Copy-Item routine.example.json routine.json   # then edit routine.json with your own schedule
 ```
 
 Edit `.env` — minimum needed to run:
@@ -240,5 +241,5 @@ Required scopes: `gmail.send`, `gmail.readonly`, `calendar`, `spreadsheets`, `dr
 | `models.py` | Shared data classes (Commitment, TimeSlot, etc.) |
 | `service_config.py` | Which integrations are enabled |
 | `config.yaml` | Priority rules and requester config (edit here, no code changes) |
-| `routine.json` | Your schedule — human-editable directly |
+| `routine.example.json` | Sample schedule; copy to `routine.json` (git-ignored) and edit it directly |
 | `.env.example` | Template for environment variables |

@@ -2,16 +2,48 @@
   "version": 1,
   "commitments": [
     {
-      "id": "sample-gym",
+      "id": "gym-001",
       "title": "Gym",
-      "type": "personal",
-      "days": ["monday", "wednesday", "friday"],
-      "start_time": "18:00",
-      "end_time": "19:00",
+      "type": "gym",
+      "days": ["monday", "tuesday", "wednesday", "thursday", "friday"],
+      "start_time": "20:00",
+      "end_time": "21:00",
       "priority": 2,
       "reschedulable": true,
-      "notes": "Example commitment. Replace with your own schedule.",
-      "calendar_event_id": null
+      "notes": "Example: low priority, can be moved by a high-priority requester"
+    },
+    {
+      "id": "class-001",
+      "title": "University Class",
+      "type": "class",
+      "days": ["sunday", "tuesday", "thursday"],
+      "start_time": "09:00",
+      "end_time": "10:30",
+      "priority": 9,
+      "reschedulable": false,
+      "notes": "Example: fixed schedule, never moved"
+    },
+    {
+      "id": "deepwork-001",
+      "title": "Deep Work Block",
+      "type": "deep_work",
+      "days": ["monday", "wednesday", "friday"],
+      "start_time": "14:00",
+      "end_time": "16:00",
+      "priority": 5,
+      "reschedulable": true,
+      "notes": "Example: protected focus time"
+    },
+    {
+      "id": "lunch-001",
+      "title": "Lunch",
+      "type": "lunch",
+      "days": ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"],
+      "start_time": "13:00",
+      "end_time": "14:00",
+      "priority": 3,
+      "reschedulable": true,
+      "notes": ""
     }
   ]
 }

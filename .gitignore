@@ -5,6 +5,7 @@ venv/
 .pytest_cache/
 .env
 .env.*
+!.env.example
 .env.local
 credentials.json
 token.json
@@ -17,7 +18,6 @@ cache/
 *.db
 *.sqlite
 .DS_Store
--e 
 # PyInstaller
 build/
 dist/
