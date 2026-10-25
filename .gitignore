@@ -6,12 +6,17 @@ venv/
 .env
 .env.*
 .env.local
+env.example
 credentials.json
 token.json
 client_secret_*.json
 processed_messages.json
 *.pem
 *.key
+*.bak
+cache/
+*.db
+*.sqlite
 .DS_Store
 -e 
 # PyInstaller
@@ -25,3 +30,6 @@ RoutineAgent.exe
 
 # Per-user encrypted account vaults (local profiles, not shared)
 profiles/
+routine.json
+knowledge_store.json
+pending_email.json

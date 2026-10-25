@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "commitments": [
+    {
+      "id": "sample-gym",
+      "title": "Gym",
+      "type": "personal",
+      "days": ["monday", "wednesday", "friday"],
+      "start_time": "18:00",
+      "end_time": "19:00",
+      "priority": 2,
+      "reschedulable": true,
+      "notes": "Example commitment. Replace with your own schedule.",
+      "calendar_event_id": null
+    }
+  ]
+}

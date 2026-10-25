@@ -133,8 +133,8 @@ conflict_resolution:
 ```bash
 git clone https://github.com/Arabyhasan/Routine-Chatbot.git
 cd Routine-Chatbot
-pip install -r requirements.txt
-cp .env.example .env
+python -m pip install -r requirements.txt
+Copy-Item env.example .env
 ```
 
 Edit `.env` — minimum needed to run:
